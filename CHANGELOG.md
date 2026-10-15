@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased — playback cleanup
+## v0.2.0 — 2026-10-15
+
+- First stable release. GPU support is limited to RTX 50 series: RTX 5090 tested; RTX 5080 normal operation user-confirmed. RTX 30 series is unsupported.
+- Updated Korean/English manuals and separate offline HTML assets, including the user-provided RTX 5090 8K playback capture (VSR OFF; approximately 265W at capture).
 
 - Keep playback state publication asynchronous; only final Stop waits for the latest status snapshot to reach disk.
 - Reuse owned NV12/P010 source plane views during RIFE preparation, with the existing fallback for external surfaces.
