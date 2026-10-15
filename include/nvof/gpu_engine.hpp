@@ -22,22 +22,6 @@ struct GpuFrame {
     unsigned hdr_transfer = 0; // PQ/HLG select BT.2020 guide conversion; output stays native.
 };
 enum class GpuCompletionMode { blocking, context_ordered };
-// Sampled GPU timeline delimited by CPU completion-wait submission/resume
-// markers. Neither bursts nor gaps measure shader-only utilization: queued
-// work, interop, preemption and driver submission can affect both intervals.
-struct GpuTimelineSample {
-    int64_t pts=0;
-    uint64_t begin_tick=0,end_tick=0;
-    uint32_t waits=0;
-    double input_ms=0,analysis_ms=0,tail_ms=0,work_ms=0,gap_ms=0;
-    double cpu_wait_ms=0,cpu_resume_ms=0,cpu_submit_ms=0;
-    double cpu_arm_ms=0,cpu_sleep_ms=0;
-    std::array<double,3> wait_ms{},gap_each_ms{};
-};
-struct GpuCaptureSample {
-    int64_t pts=0;
-    double copy_ms=0,normalize_ms=0,total_ms=0;
-};
 // Wall-clock API/lock/wait measurements, not GPU timestamp durations.
 struct GpuPairTiming {
     std::shared_ptr<const RifeTiming> rife;
@@ -57,10 +41,7 @@ struct GpuPairTiming {
     uint32_t flush_event_wait_calls=0; // Subset of event_wait_calls; Flush1 ALL.
     uint32_t queued_output_flushes=0;
     std::array<double,3> wait_each_ms{},resume_each_ms{};
-    std::array<GpuTimelineSample,4> gpu_samples{};
-    uint32_t gpu_sample_count=0,gpu_samples_invalid=0,gpu_samples_skipped=0;
-    std::array<GpuCaptureSample,4> capture_samples{};
-    uint32_t capture_sample_count=0;
+
 };
 // NV12/P010 GPU-only image path. Native Y/UV processing preserves stored
 // channel values; the caller remains responsible for supported color metadata.
@@ -92,7 +73,7 @@ public:
     std::string device_name() const;
     bool queued_completion() const;
     MotionAnalysisInfo analysis_info() const;
-    void enable_timing(bool enabled,bool gpu_timeline=false,bool every_pair=false,unsigned profile_interval=1);
+    void enable_timing(bool enabled,bool rife_detail=false,unsigned profile_interval=1);
     GpuPairTiming pair_timing() const;
     // Runs only with the shared device scope released, on the calling thread.
     // Return an optional borrowed wake event for ready-output delivery. The

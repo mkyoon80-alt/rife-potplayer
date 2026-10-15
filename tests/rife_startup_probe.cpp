@@ -8,7 +8,7 @@ int wmain(int argc,wchar_t**argv){timeBeginPeriod(1);try{
  auto fa=dev.upload(a,7680,4320,0,true,15),fb=dev.upload(b,7680,4320,166667,true,15);dev.wait();
  if(argc>2){auto t=Clock::now();require(MotionSynthesizer::preload_async(argv[1],dev.d.Get()),"preload request");std::cout<<"PRELOAD requestMs="<<elapsed(t)<<std::endl;if(std::wstring(argv[2])==L"ready")Sleep(750);}
  for(int file=0;file<3;++file){
-  auto e=engine(dev,argv[1]);e->enable_timing(true,false,true,1);
+  auto e=engine(dev,argv[1]);e->enable_timing(true,true,1);
   auto start=Clock::now();auto original=e->copy(fa,true);dev.wait();double originalMs=elapsed(start);
   for(int pair=0;pair<3;++pair){
    start=Clock::now();auto result=e->interpolate_pair(fa,fb,{41667,83333,125000});dev.wait();double total=elapsed(start);auto t=e->pair_timing();require(t.rife!=nullptr,"timing required");auto r=*t.rife;

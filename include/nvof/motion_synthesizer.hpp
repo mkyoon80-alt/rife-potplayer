@@ -1,5 +1,6 @@
 #pragma once
 #include <memory>
+#include <array>
 #include <filesystem>
 #include <cstdint>
 #include <functional>
@@ -41,7 +42,11 @@ public:
     // False leaves the pair unprepared; the caller must hold the original frame
     // and invalidate history. No earlier pair's decision may be reused.
     using PairReady = std::function<bool()>;
-    void prepare(ID3D11Texture2D*, ID3D11Texture2D*, int width, int height, const GpuWait& wait = {}, const PairReady& ready = {});
+    // Optional trusted pool views in A-Y, B-Y, A-UV, B-UV order. They must
+    // refer to the supplied single-slice textures with matching UNORM formats.
+    // References are retained only for the prepared pair, never across reset.
+    using SourcePlanes=std::array<ID3D11ShaderResourceView*,4>;
+    void prepare(ID3D11Texture2D*, ID3D11Texture2D*, int width, int height, const GpuWait& wait = {}, const PairReady& ready = {}, const SourcePlanes& planes = {});
     // True only when this source pair passed the scene/identity gate.
     bool prepared() const noexcept;
     // Resource preparation and synthetic CUDA warmup, after originals are

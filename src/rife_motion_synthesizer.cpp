@@ -306,7 +306,7 @@ struct MotionSynthesizer::Impl {
         inputUav.Reset();motionSrv.Reset();input.Reset();motion.Reset();params.Reset();prepCS.Reset();timeCS.Reset();vertex.Reset();pixel.Reset();pixelY.Reset();pixelUV.Reset();sampler.Reset();raster.Reset();
     }
     ~Impl(){reset(true);}
-    void prepare(ID3D11Texture2D* a,ID3D11Texture2D* b,int w,int h,const GpuWait& wait,const PairReady& ready){
+    void prepare(ID3D11Texture2D* a,ID3D11Texture2D* b,int w,int h,const GpuWait& wait,const PairReady& ready,const SourcePlanes& planes){
         clear_history();
         if(!a||!b||w<2||h<2||(w&1)||(h&1))throw std::invalid_argument("RIFE needs matching even NV12/P010 sources");
         D3D11_TEXTURE2D_DESC ad{},bd{};a->GetDesc(&ad);b->GetDesc(&bd);
@@ -321,10 +321,16 @@ struct MotionSynthesizer::Impl {
         const float rw=float(p.portrait?h:w),rh=float(p.portrait?w:h);
         const float scale=(std::min)({float(GW)/rw,float(GH)/rh,1.0f});
         p.aw=rw*scale;p.ah=rh*scale;p.ox=(GW-p.aw)*.5f;p.oy=(GH-p.ah)*.5f;
-        ID3D11Texture2D* textures[]={a,b,a,b};
-        for(unsigned i=0;i<4;++i){D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;
-            sd.Format=p.tenBit?(i<2?DXGI_FORMAT_R16_UNORM:DXGI_FORMAT_R16G16_UNORM):(i<2?DXGI_FORMAT_R8_UNORM:DXGI_FORMAT_R8G8_UNORM);
-            ck(d->CreateShaderResourceView(textures[i],&sd,&views[i]),"RIFE source plane");}
+        const bool supplied=std::any_of(planes.begin(),planes.end(),[](auto* view){return view!=nullptr;});
+        if(supplied&&!std::all_of(planes.begin(),planes.end(),[](auto* view){return view!=nullptr;}))
+            throw std::invalid_argument("RIFE source planes must be complete");
+        if(supplied){for(size_t i=0;i<views.size();++i)views[i]=planes[i];}
+        else {
+            ID3D11Texture2D* textures[]={a,b,a,b};
+            for(unsigned i=0;i<4;++i){D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;
+                sd.Format=p.tenBit?(i<2?DXGI_FORMAT_R16_UNORM:DXGI_FORMAT_R16G16_UNORM):(i<2?DXGI_FORMAT_R8_UNORM:DXGI_FORMAT_R8G8_UNORM);
+                ck(d->CreateShaderResourceView(textures[i],&sd,&views[i]),"RIFE source plane");}
+        }
         auto guideTimer=profiler.begin_gpu(RifeGpuKind::guide,.5f,w,h);
         parameters(.5f);ID3D11ShaderResourceView* srvs[]={views[0].Get(),views[1].Get(),views[2].Get(),views[3].Get()};
         c->CSSetShaderResources(0,4,srvs);auto sp=sampler.Get();c->CSSetSamplers(0,1,&sp);auto u=inputUav.Get();c->CSSetUnorderedAccessViews(0,1,&u,nullptr);
@@ -465,7 +471,7 @@ struct MotionSynthesizer::Impl {
 };
 MotionSynthesizer::MotionSynthesizer(ID3D11Device* d,ID3D11DeviceContext* c,const std::filesystem::path& directory):impl_(std::make_unique<Impl>(d,c,directory)){}
 MotionSynthesizer::~MotionSynthesizer()=default;
-void MotionSynthesizer::prepare(ID3D11Texture2D* a,ID3D11Texture2D* b,int w,int h,const GpuWait& wait,const PairReady& ready){impl_->prepare(a,b,w,h,wait,ready);}
+void MotionSynthesizer::prepare(ID3D11Texture2D* a,ID3D11Texture2D* b,int w,int h,const GpuWait& wait,const PairReady& ready,const SourcePlanes& planes){impl_->prepare(a,b,w,h,wait,ready,planes);}
 void MotionSynthesizer::set_hdr_transfer(unsigned transfer)noexcept{impl_->p.hdrTransfer=transfer;}
 void MotionSynthesizer::begin_timing(bool enabled,int64_t pts){impl_->profiler.begin_pair(enabled,pts);}
 const RifeTiming& MotionSynthesizer::timing()const noexcept{return impl_->profiler.data;}

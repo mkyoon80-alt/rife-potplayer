@@ -1826,7 +1826,7 @@ private:
         if(!gpu_pipeline_)gpu_pipeline_=std::make_unique<nvof::GpuPhasePipeline>(target_,
             [this](const nvof::GpuFrame& a,const nvof::GpuFrame& b,const std::vector<int64_t>& times) {
                 nvof::PlaybackTimer synthesis_timer(performance_.enabled,performance_.synthesis);
-                gpu_engine_->enable_timing(performance_.enabled,false,trace_every_gpu_pair_,trace_sample_interval_);
+                gpu_engine_->enable_timing(performance_.enabled,trace_every_gpu_pair_,trace_sample_interval_);
                 gpu_engine_->set_wait_service(worker_processing_&&output_ahead_limit()?
                     nvof::GpuRifeEngine::WaitService([this]{return service_waiting_outputs();}):nvof::GpuRifeEngine::WaitService{});
                 const auto pair_begin=performance_.enabled?nvof::PlaybackTimer::Clock::now():nvof::PlaybackTimer::Clock::time_point{};
@@ -1899,28 +1899,6 @@ private:
                                 " kind="+kind+" width="+std::to_string(t.width)+" height="+std::to_string(t.height)+" gpuMs="+std::to_string(t.gpu_ms));
                         }
                     }
-                    for(unsigned i=0;i<timing.capture_sample_count;++i) {
-                        const auto& capture=timing.capture_samples[i];
-                        write_performance("gpu capture instance="+std::to_string(instance_id_)+" pts="+std::to_string(capture.pts)+
-                            " copyMs="+std::to_string(capture.copy_ms)+" normalizeMs="+std::to_string(capture.normalize_ms)+
-                            " totalMs="+std::to_string(capture.total_ms));
-                    }
-                    for(unsigned i=0;i<timing.gpu_sample_count;++i) {
-                        const auto& sample=timing.gpu_samples[i];
-                        write_performance("gpu timeline instance="+std::to_string(instance_id_)+" pts="+std::to_string(sample.pts)+
-                            " beginTickMs="+std::to_string(sample.begin_tick)+" endTickMs="+std::to_string(sample.end_tick)+
-                            " waits="+std::to_string(sample.waits)+" inputMs="+std::to_string(sample.input_ms)+
-                            " analysisMs="+std::to_string(sample.analysis_ms)+" tailMs="+std::to_string(sample.tail_ms)+
-                            " workMs="+std::to_string(sample.work_ms)+" gapMs="+std::to_string(sample.gap_ms)+
-                            " cpuWaitMs="+std::to_string(sample.cpu_wait_ms)+" cpuResumeMs="+std::to_string(sample.cpu_resume_ms)+
-                            " cpuSubmitMs="+std::to_string(sample.cpu_submit_ms)+
-                            " cpuArmMs="+std::to_string(sample.cpu_arm_ms)+" cpuSleepMs="+std::to_string(sample.cpu_sleep_ms)+
-                            " wait0CpuMs="+std::to_string(sample.wait_ms[0])+" wait1CpuMs="+std::to_string(sample.wait_ms[1])+
-                            " gap0Ms="+std::to_string(sample.gap_each_ms[0])+" gap1Ms="+std::to_string(sample.gap_each_ms[1]));
-                    }
-                    if(timing.gpu_samples_invalid||timing.gpu_samples_skipped)
-                        write_performance("gpu timeline unavailable invalid="+std::to_string(timing.gpu_samples_invalid)+
-                            " skipped="+std::to_string(timing.gpu_samples_skipped));
                 } catch (...) { /* Drop diagnostics; keep the completed video batch. */ }
                 record_quality(batch.quality,times.size());record_endpoints(a.pts,b.pts,times);return batch;
             },nvof::canonical_source_rate(input_.duration));
@@ -2373,8 +2351,9 @@ private:
                     << ",\"message\":" << json_string(message) << "}\n";
             // Snapshot mutable counters on their existing owner thread. Only
             // immutable JSON is passed to the optional disk worker.
-            status_writer_->publish(directory,stream.str());
-            if(transition)status_writer_->drain();
+            // Active/waiting/bypass/error updates must never wait for storage.
+            // StopStreaming runs after receive quiesces and preserves final visibility.
+            status_writer_->publish(directory,stream.str(),state=="stopped");
         } catch (...) { /* Status is optional and cannot break decoding. */ }
     }
 

@@ -36,10 +36,8 @@ DXGI_FORMAT plane_format(DXGI_FORMAT format,unsigned plane) {
 struct GpuRifeEngine::Impl {
     std::mutex mutex;
     bool trace_timing=false;
-    bool trace_gpu_timeline=false;
-    bool trace_every_pair=false,trace_rife=false;
+    bool trace_rife=false;
     unsigned profile_interval=1;uint64_t profile_sequence=0;
-    uint64_t trace_epoch=0;
     GpuPairTiming timing{};
     GpuCompletionMode completion_mode=GpuCompletionMode::blocking;
     HANDLE decoder_mutex=nullptr; // Borrowed, never closed here.
@@ -55,28 +53,6 @@ struct GpuRifeEngine::Impl {
     ComPtr<ID3D11Fence> completion_fence;
     HANDLE completion_event=nullptr;uint64_t fence_value=0;
     GpuRifeEngine::WaitService wait_service;
-    struct TimelineSlot {
-        ComPtr<ID3D11Query> disjoint;
-        std::array<ComPtr<ID3D11Query>,12> stamps;
-        GpuTimelineSample sample{};
-        uint64_t epoch=0;
-        unsigned stamp_count=0;
-        bool pending=false;
-    };
-    std::array<TimelineSlot,4> timeline;
-    TimelineSlot* timeline_active=nullptr;
-    uint64_t timeline_pairs=0;
-    bool timeline_unavailable=false;
-    struct CaptureSlot {
-        ComPtr<ID3D11Query> disjoint;
-        std::array<ComPtr<ID3D11Query>,3> stamps;
-        int64_t pts=0;
-        uint64_t epoch=0;
-        bool pending=false;
-    };
-    std::array<CaptureSlot,4> captures;
-    CaptureSlot* capture_active=nullptr;
-    bool capture_unavailable=false;
     ComPtr<ID3D11ComputeShader> scene_compute,scene_identity,scene_match;
     SceneDetector scene_detector;
     ID3D11Texture2D* scene_previous=nullptr; // Identity only, no extra decoder lease.
@@ -201,137 +177,6 @@ struct GpuRifeEngine::Impl {
         if((desc.Format!=DXGI_FORMAT_NV12&&!(allow_p010&&desc.Format==DXGI_FORMAT_P010))||desc.Width<UINT(f.width)||desc.Height<UINT(f.height)||desc.ArraySize<=f.array_slice||desc.SampleDesc.Count!=1||desc.MipLevels!=1)throw std::invalid_argument("GPU NV12 texture format, dimensions or array slice invalid");
         ComPtr<ID3D11Device> source_device;f.texture->GetDevice(&source_device);if(source_device.Get()!=device.Get())throw std::invalid_argument("GPU input texture belongs to another D3D11 device");
     }
-    void begin_capture(int64_t pts) noexcept {
-        // Only detailed tracing, once playback resources already exist. Do
-        // not allocate diagnostic queries before the first visible original.
-        if(!trace_every_pair||!trace_gpu_timeline||capture_unavailable||
-            !native_synthesizer||native_synthesizer->analysis_info().width==0)return;
-        for(auto& slot:captures) {
-            if(slot.pending)continue;
-            if(!slot.disjoint) {
-                D3D11_QUERY_DESC desc{D3D11_QUERY_TIMESTAMP_DISJOINT,0};
-                if(FAILED(device->CreateQuery(&desc,&slot.disjoint))){capture_unavailable=true;return;}
-                desc.Query=D3D11_QUERY_TIMESTAMP;
-                for(auto& stamp:slot.stamps)if(FAILED(device->CreateQuery(&desc,&stamp))){capture_unavailable=true;return;}
-            }
-            slot.pts=pts;slot.epoch=trace_epoch;capture_active=&slot;
-            context->Begin(slot.disjoint.Get());context->End(slot.stamps[0].Get());return;
-        }
-    }
-    void capture_copied() noexcept {if(capture_active)context->End(capture_active->stamps[1].Get());}
-    void end_capture() noexcept {
-        if(!capture_active)return;
-        context->End(capture_active->stamps[2].Get());context->End(capture_active->disjoint.Get());
-        capture_active->pending=true;capture_active=nullptr;
-    }
-    void collect_captures() noexcept {
-        for(auto& slot:captures) {
-            if(!slot.pending)continue;
-            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT frequency{};
-            const HRESULT ready=context->GetData(slot.disjoint.Get(),&frequency,sizeof(frequency),D3D11_ASYNC_GETDATA_DONOTFLUSH);
-            if(ready==S_FALSE)continue;
-            if(FAILED(ready)||frequency.Disjoint||!frequency.Frequency){slot.pending=false;continue;}
-            std::array<UINT64,3> ticks{};bool complete=true,invalid=false;
-            for(unsigned i=0;i<ticks.size();++i) {
-                const HRESULT hr=context->GetData(slot.stamps[i].Get(),&ticks[i],sizeof(ticks[i]),D3D11_ASYNC_GETDATA_DONOTFLUSH);
-                if(hr==S_FALSE){complete=false;break;}
-                if(FAILED(hr)||(i&&ticks[i]<ticks[i-1])){invalid=true;break;}
-            }
-            if(!complete)continue;
-            slot.pending=false;if(invalid||slot.epoch!=trace_epoch)continue;
-            if(timing.capture_sample_count<timing.capture_samples.size()) {
-                const double scale=1000.0/double(frequency.Frequency);
-                timing.capture_samples[timing.capture_sample_count++]={slot.pts,
-                    double(ticks[1]-ticks[0])*scale,double(ticks[2]-ticks[1])*scale,double(ticks[2]-ticks[0])*scale};
-            }
-        }
-    }
-    // Never wait/flush for diagnostics. Slots are read on later pairs and reused
-    // only after GetData says they are complete; unread samples can be skipped.
-    void collect_timeline() noexcept {
-        if(!trace_gpu_timeline)return;
-        for(auto& slot:timeline) {
-            if(!slot.pending)continue;
-            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT frequency{};
-            const HRESULT ready=context->GetData(slot.disjoint.Get(),&frequency,sizeof(frequency),D3D11_ASYNC_GETDATA_DONOTFLUSH);
-            if(ready==S_FALSE)continue;
-            if(FAILED(ready)||frequency.Disjoint||!frequency.Frequency) {
-                slot.pending=false;++timing.gpu_samples_invalid;continue;
-            }
-            std::array<UINT64,12> ticks{};bool complete=true,invalid=false;
-            for(unsigned i=0;i<slot.stamp_count;++i) {
-                const HRESULT hr=context->GetData(slot.stamps[i].Get(),&ticks[i],sizeof(ticks[i]),D3D11_ASYNC_GETDATA_DONOTFLUSH);
-                if(hr==S_FALSE){complete=false;break;}
-                if(FAILED(hr)||(i&&ticks[i]<ticks[i-1])){invalid=true;break;}
-            }
-            if(!complete)continue;
-            slot.pending=false;
-            if(slot.epoch!=trace_epoch)continue;
-            if(invalid||slot.stamp_count<2*slot.sample.waits+2||slot.sample.waits>3) {
-                ++timing.gpu_samples_invalid;continue;
-            }
-            auto sample=slot.sample;
-            const double scale=1000.0/double(frequency.Frequency);
-            const unsigned tail_begin=2*sample.waits,tail_end=slot.stamp_count-1;
-            for(unsigned i=0;i<tail_begin;++i) {
-                const double ms=double(ticks[i+1]-ticks[i])*scale;
-                if(i&1){sample.gap_ms+=ms;sample.gap_each_ms[i/2]=ms;}
-                else {
-                    sample.work_ms+=ms;
-                    if(i==0)sample.input_ms=ms;
-                    if(i==2&&sample.waits>=2)sample.analysis_ms=ms;
-                }
-            }
-            sample.tail_ms=double(ticks[tail_end]-ticks[tail_begin])*scale;
-            sample.work_ms+=sample.tail_ms;
-            if(timing.gpu_sample_count<timing.gpu_samples.size())timing.gpu_samples[timing.gpu_sample_count++]=sample;
-            else ++timing.gpu_samples_skipped;
-        }
-    }
-    void begin_timeline(int64_t pts,bool continuous) noexcept {
-        collect_captures();
-        collect_timeline();
-        // Normal tracing samples every eight continuous pairs. Detailed
-        // diagnosis samples every pair so a previous frame's expensive output
-        // cannot be mistaken for unexplained waiting on the following frame.
-        // Cold/cut paths remain observable in CPU timings.
-        if(!trace_gpu_timeline||timeline_unavailable||!continuous)return;
-        if((++timeline_pairs%8)&&!trace_every_pair)return;
-        for(auto& slot:timeline) {
-            if(slot.pending)continue;
-            if(!slot.disjoint) {
-                D3D11_QUERY_DESC desc{D3D11_QUERY_TIMESTAMP_DISJOINT,0};
-                if(FAILED(device->CreateQuery(&desc,&slot.disjoint))){timeline_unavailable=true;++timing.gpu_samples_invalid;return;}
-                desc.Query=D3D11_QUERY_TIMESTAMP;
-                for(auto& stamp:slot.stamps)if(FAILED(device->CreateQuery(&desc,&stamp))){timeline_unavailable=true;++timing.gpu_samples_invalid;return;}
-            }
-            slot.sample={};slot.epoch=trace_epoch;slot.sample.pts=pts;slot.sample.begin_tick=GetTickCount64();slot.stamp_count=0;
-            timeline_active=&slot;context->Begin(slot.disjoint.Get());timeline_stamp();return;
-        }
-        ++timing.gpu_samples_skipped;
-    }
-    void timeline_stamp() noexcept {
-        if(timeline_active&&timeline_active->stamp_count<timeline_active->stamps.size())
-            context->End(timeline_active->stamps[timeline_active->stamp_count++].Get());
-    }
-    void end_timeline() noexcept {
-        if(!timeline_active)return;
-        timeline_stamp();context->End(timeline_active->disjoint.Get());
-        auto& sample=timeline_active->sample;sample.end_tick=GetTickCount64();
-        sample.cpu_wait_ms=timing.wait_completion_ms;sample.cpu_resume_ms=timing.context_resume_ms;sample.cpu_submit_ms=timing.wait_submit_ms;
-        sample.cpu_arm_ms=timing.event_arm_ms;sample.cpu_sleep_ms=timing.event_sleep_ms;
-        timeline_active->pending=true;timeline_active=nullptr;
-    }
-    struct TimelineScope {
-        Impl& owner;DeviceScope& device;
-        TimelineScope(Impl& impl,DeviceScope& scope,int64_t pts,bool continuous):owner(impl),device(scope){owner.begin_timeline(pts,continuous);}
-        ~TimelineScope(){
-            // An exceptional wait can lose the shared lock. Abandon that
-            // diagnostic query rather than touching the host context unlocked.
-            if(device.released){owner.timeline_active=nullptr;owner.timeline_unavailable=true;}
-            else owner.end_timeline();
-        }
-    };
     // A terminal completion wait needs the shared context only to submit its
     // fence/query. Restore the host's state before releasing the device locks,
     // then keep waiting for exactly the same GPU completion boundary. The
@@ -433,9 +278,7 @@ struct GpuRifeEngine::Impl {
         if(result!=WAIT_OBJECT_0)throw std::runtime_error("RIFE CUDA readiness timeout");
     }
     void wait_and_resume(DeviceScope& scope){
-        timeline_stamp();
         const double previous_wait=timing.wait_completion_ms;
-        if(timeline_active)++timeline_active->sample.waits;
         const auto begin=trace_timing?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
         if(trace_timing)++timing.shared_wait_calls;
         // Only the device/context locks are released. The engine mutex keeps
@@ -453,9 +296,6 @@ struct GpuRifeEngine::Impl {
                 timing.resume_each_ms[timing.shared_wait_calls-1]=std::chrono::duration<double,std::milli>(end-resume).count();
             }
         }
-        timeline_stamp();
-        if(timeline_active&&timeline_active->sample.waits<=timeline_active->sample.wait_ms.size())
-            timeline_active->sample.wait_ms[timeline_active->sample.waits-1]=timing.wait_completion_ms-previous_wait;
     }
     ComPtr<ID3D11Texture2D> make_texture(DXGI_FORMAT format,int w,int h){
         D3D11_TEXTURE2D_DESC desc{};desc.Width=w;desc.Height=h;desc.MipLevels=1;desc.ArraySize=1;desc.Format=format;desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
@@ -477,6 +317,23 @@ struct GpuRifeEngine::Impl {
         for(unsigned p=0;p<2;++p){auto viewFormat=plane_format(format,p);slot->views[p]=source_view(slot->texture.Get(),viewFormat);slot->targets[p]=target_view(slot->texture.Get(),viewFormat);}
         if(output_pool.size()<64)output_pool.push_back(slot);
         return {slot->texture,0,w,h,pts,slot};
+    }
+    // Reuse the source planes already owned by our surface pool. The local
+    // COM references survive the scene wait; prepare takes its own references.
+    // External/nonpooled textures keep the existing one-call view fallback.
+    void prepare_rife(const GpuFrame& a,const GpuFrame& b,const MotionSynthesizer::GpuWait& wait,const MotionSynthesizer::PairReady& ready){
+        auto ta=shader_source_texture(a),tb=shader_source_texture(b);
+        MotionSynthesizer::SourcePlanes planes{};
+        std::array<ComPtr<ID3D11ShaderResourceView>,4> owned{};
+        for(auto& slot:output_pool){
+            if(slot->texture.Get()==ta.Get()){owned[0]=slot->views[0];owned[2]=slot->views[1];}
+            if(slot->texture.Get()==tb.Get()){owned[1]=slot->views[0];owned[3]=slot->views[1];}
+        }
+        // Keep the fallback lazy: a cut/still pair must not create new views
+        // before its gate has rejected inference.
+        if(std::all_of(owned.begin(),owned.end(),[](const auto& view){return bool(view);}))
+            for(size_t i=0;i<owned.size();++i)planes[i]=owned[i].Get();
+        native_synthesizer->prepare(ta.Get(),tb.Get(),a.width,a.height,wait,ready,planes);
     }
     struct SceneAnalysis {SceneDecision decision;bool identical=false;};
     void queue_scene(const GpuFrame& a,const GpuFrame& b){
@@ -545,7 +402,6 @@ struct GpuRifeEngine::Impl {
         // removes decoder padding without reading video pixels back to the CPU.
         D3D11_BOX box{0,0,0,UINT(input.width),UINT(input.height),1};
         context->CopySubresourceRegion(p010_capture.Get(),0,0,0,0,input.texture.Get(),input.array_slice,&box);
-        capture_copied();
         for(unsigned plane=0;plane<2;++plane) {
             auto target=target_view(output.texture.Get(),plane?DXGI_FORMAT_R16G16_UNORM:DXGI_FORMAT_R16_UNORM);
             draw_plane(target.Get(),p010_views[plane].Get(),plane?input.width/2:input.width,plane?input.height/2:input.height);
@@ -560,7 +416,7 @@ MotionAnalysisInfo GpuRifeEngine::analysis_info() const {
     return impl_->native_synthesizer?impl_->native_synthesizer->analysis_info():MotionAnalysisInfo{};
 }
 GpuRifeEngine::~GpuRifeEngine()=default;
-void GpuRifeEngine::enable_timing(bool enabled,bool gpu_timeline,bool every_pair,unsigned interval){std::lock_guard<std::mutex> lock(impl_->mutex);impl_->trace_timing=enabled;impl_->trace_gpu_timeline=enabled&&gpu_timeline;impl_->trace_every_pair=enabled&&gpu_timeline&&every_pair;impl_->trace_rife=enabled&&every_pair;impl_->profile_interval=(std::max)(1u,interval);}
+void GpuRifeEngine::enable_timing(bool enabled,bool rife_detail,unsigned interval){std::lock_guard<std::mutex> lock(impl_->mutex);impl_->trace_timing=enabled;impl_->trace_rife=enabled&&rife_detail;impl_->profile_interval=(std::max)(1u,interval);}
 GpuPairTiming GpuRifeEngine::pair_timing()const{std::lock_guard<std::mutex> lock(impl_->mutex);return impl_->timing;}
 std::string GpuRifeEngine::device_name()const{return impl_->name;}
 bool GpuRifeEngine::queued_completion()const{return impl_->completion_mode==GpuCompletionMode::context_ordered;}
@@ -573,7 +429,6 @@ int GpuRifeEngine::startup_warmup(){
 }
 void GpuRifeEngine::reset()noexcept{
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    ++impl_->trace_epoch; // Discard late diagnostic results from the old seek.
     impl_->scene_detector.reset();impl_->scene_previous=nullptr;impl_->scene_previous_pts=-1;
     try{
         Impl::DeviceScope scope(*impl_);
@@ -588,20 +443,11 @@ GpuFrame GpuRifeEngine::copy(const GpuFrame& input,bool submit_now){
     D3D11_TEXTURE2D_DESC desc{};input.texture->GetDesc(&desc);
     auto result=impl_->make_output(input.width,input.height,input.pts,desc.Format);
     result.hdr=input.hdr;result.hdr_transfer=input.hdr_transfer;
-    impl_->begin_capture(input.pts);
-    // End the disjoint query even if a view allocation throws. An incomplete
-    // copy marker is never collected, and a later pair may reuse the slot.
-    struct CaptureScope {
-        Impl& owner;bool completed=false;
-        ~CaptureScope(){if(completed)owner.end_capture();else if(owner.capture_active){owner.context->End(owner.capture_active->disjoint.Get());owner.capture_active=nullptr;}}
-    } capture{*impl_};
     if(desc.Format==DXGI_FORMAT_P010)impl_->normalize_p010(input,result);
     else {
         D3D11_BOX box{0,0,0,UINT(input.width),UINT(input.height),1};
         impl_->context->CopySubresourceRegion(result.texture.Get(),0,0,0,0,input.texture.Get(),input.array_slice,&box);
-        impl_->capture_copied();
     }
-    capture.completed=true;impl_->end_capture();
     if(!queued_completion())impl_->wait_gpu(&device);
     else if(submit_now)impl_->context->Flush();
     return result;
@@ -631,7 +477,6 @@ PhaseBatch<GpuFrame> GpuRifeEngine::interpolate_pair(const GpuFrame& previous,co
         try {
             const bool continuous=impl_->cached_texture.Get()==previous.texture.Get()&&impl_->cached_pts==previous.pts&&
                impl_->cached_slice==previous.array_slice;
-            Impl::TimelineScope timeline(*impl_,scope,current.pts,continuous&&impl_->native_synthesizer->analysis_info().width!=0);
             if(!continuous)impl_->native_synthesizer->invalidate_history();
             impl_->native_synthesizer->set_hdr_transfer(previous.hdr_transfer);
             // Scene history tracks adjacency independently of the RIFE cache, which
@@ -646,8 +491,7 @@ PhaseBatch<GpuFrame> GpuRifeEngine::interpolate_pair(const GpuFrame& previous,co
             if(combined) {
                 if(impl_->trace_timing)++impl_->timing.combined_scene_pairs;
                 mark(impl_->timing.scene_ms);
-                auto a=impl_->shader_source_texture(previous),b=impl_->shader_source_texture(current);
-                impl_->native_synthesizer->prepare(a.Get(),b.Get(),previous.width,previous.height,
+                impl_->prepare_rife(previous,current,
                     [&]{impl_->wait_and_resume(scope);},[&]{
                         analysis=impl_->read_scene(scope,true);
                         return !analysis.decision.cut&&!analysis.identical;
@@ -669,10 +513,9 @@ PhaseBatch<GpuFrame> GpuRifeEngine::interpolate_pair(const GpuFrame& previous,co
                 result.quality.identical_warp_skipped=true;impl_->native_synthesizer->invalidate_history();
             }else{
                 if(!combined) {
-                    auto a=impl_->shader_source_texture(previous),b=impl_->shader_source_texture(current);
                     MotionSynthesizer::GpuWait wait;
                     if(queued_completion())wait=[&]{impl_->wait_and_resume(scope);};
-                    impl_->native_synthesizer->prepare(a.Get(),b.Get(),previous.width,previous.height,wait,{});
+                    impl_->prepare_rife(previous,current,wait,{});
                     mark(impl_->timing.prepare_ms);
                 }
                 result.quality.repetition_known=true;
@@ -703,9 +546,7 @@ PhaseBatch<GpuFrame> GpuRifeEngine::interpolate_pair(const GpuFrame& previous,co
                 // Submit the output batch before downstream can
                 // park this thread waiting for a renderer sample/presentation.
                 // Flush is asynchronous: retain the shared-context completion
-                // contract and the existing OF session, with no new GPU wait.
-                // Include the final diagnostic timestamp in the same submission.
-                impl_->end_timeline();
+                // contract and the existing RIFE resources, with no new GPU wait.
                 impl_->context->Flush();
                 if(impl_->trace_timing)++impl_->timing.queued_output_flushes;
             }

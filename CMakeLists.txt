@@ -168,3 +168,7 @@ add_test(NAME startup_original_window COMMAND startup_original_window_tests)
 add_executable(RifeEngineBuilder tools/rife_engine_builder.cpp)
 target_compile_definitions(RifeEngineBuilder PRIVATE NOMINMAX)
 target_include_directories(RifeEngineBuilder PRIVATE third_party/tensorrt "${CUDA_HEADERS}")
+
+add_executable(rife_source_views_tests tests/rife_source_views_tests.cpp)
+target_link_libraries(rife_source_views_tests PRIVATE nvof_gpu_engine winmm bcrypt)
+add_test(NAME rife_source_views COMMAND rife_source_views_tests "${CMAKE_CURRENT_SOURCE_DIR}/bin/runtime")

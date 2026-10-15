@@ -24,6 +24,28 @@ int main() {
         unblock.set_value();producer.get();writer.drain();
         require(nonblocking,"status producer waited for disk");
         require(written==std::vector<std::string>{"first","stopped"},"pending status backlog or stale final state");
+        // Playback state changes stay responsive even with storage blocked.
+        // Only explicit Stop waits for the final latest snapshot to be saved.
+        std::promise<void> slowEntered,slowRelease;
+        auto slowGate=slowRelease.get_future().share();
+        std::vector<std::string> transitions;
+        nvof::StatusWriter slow([&](const nvof::StatusSnapshot& s){
+            if(s.text=="connecting"){slowEntered.set_value();slowGate.wait();}
+            transitions.push_back(s.text);
+        });
+        slow.publish({},"connecting");
+        require(slowEntered.get_future().wait_for(2s)==std::future_status::ready,"slow writer did not start");
+        auto playing=std::async(std::launch::async,[&]{
+            for(int i=0;i<100;++i)for(const char* state:{"waiting","active","bypass","error"})slow.publish({},state);
+        });
+        const bool playbackReady=playing.wait_for(500ms)==std::future_status::ready;
+        if(!playbackReady){slowRelease.set_value();playing.get();throw std::runtime_error("playback transition waited for storage");}
+        playing.get();
+        auto stop=std::async(std::launch::async,[&]{slow.publish({},"stopped",true);});
+        const bool stopWaited=stop.wait_for(30ms)==std::future_status::timeout;
+        slowRelease.set_value();stop.get();
+        require(stopWaited,"Stop returned before its final status was published");
+        require(transitions==std::vector<std::string>{"connecting","stopped"},"stale playback status overwrote Stop");
         std::atomic<unsigned> calls=0;
         {nvof::StatusWriter failing([&](const nvof::StatusSnapshot&){++calls;throw std::runtime_error("disk failure");});
             failing.publish({},"error");failing.drain();failing.publish({},"stopped");}

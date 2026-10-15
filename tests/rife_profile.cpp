@@ -16,7 +16,7 @@ void diagnostics_test(Device& dev,const std::filesystem::path& runtime){
     for(auto spec:std::vector<std::array<int,4>>{{1920,1080,0,0},{3840,2160,1,15},{1080,1920,0,0}}){
         int w=spec[0],h=spec[1];auto a=pattern(w,h,0,spec[2]),b=pattern(w,h,8,spec[2]);auto fa=dev.upload(a,w,h,0,spec[2],spec[3]),fb=dev.upload(b,w,h,400000,spec[2],spec[3]);
         e->enable_timing(false);auto original=e->interpolate_pair(fa,fb,{100000,200000,300000});std::vector<std::vector<uint8_t>> refs;for(auto& f:original.frames)refs.push_back(dev.read(f));
-        require(!e->pair_timing().rife,"Disabled diagnostics produced data");e->reset();e->enable_timing(true,false,true);
+        require(!e->pair_timing().rife,"Disabled diagnostics produced data");e->reset();e->enable_timing(true,true);
         for(int k=0;k<4;++k){auto batch=e->interpolate_pair(fa,fb,{100000,200000,300000});dev.wait();auto t=e->pair_timing().rife?*e->pair_timing().rife:RifeTiming{};
             require(t.enabled&&t.phase_count==3&&t.pair>lastPair,"Per-pair profiling identity failed");lastPair=t.pair;consume(t);
             for(unsigned i=0;i<t.phase_count;++i){auto& q=t.phases[i];require((q.cuda_valid||q.cuda_pending)&&q.pair==t.pair,"Current CUDA sample missing");require(dev.read(batch.frames[i])==refs[i],"Profiling changed output pixels");}
@@ -48,7 +48,7 @@ int wmain(int argc,wchar_t**argv){timeBeginPeriod(1);try{
             cpu<<id<<','<<ph<<','<<mode<<','<<q.pair<<','<<q.pts<<','<<q.phase<<','<<q.width<<','<<q.height<<','<<q.cuda_valid<<','<<q.inference_gpu_ms<<','<<q.map_stream_ms<<','<<q.unmap_stream_ms<<','<<q.time_submit_cpu_ms<<','<<q.device_cpu_ms<<','<<q.map_cpu_ms<<','<<q.bind_cpu_ms<<','<<q.enqueue_cpu_ms<<','<<q.unmap_cpu_ms<<','<<q.sync_cpu_ms<<','<<q.composite_submit_cpu_ms<<','<<q.event_read_cpu_ms<<','<<q.total_cpu_ms<<','<<q.status_query_cpu_ms<<','<<q.graph_replayed<<','<<q.graph_created<<'\n';};
         for(int phases:{1,3}){auto pts=phases==1?std::vector<int64_t>{200000}:std::vector<int64_t>{100000,200000,300000};
             for(int mode:(round%2?std::vector<int>{0,2,3,3,2,0}:std::vector<int>{3,2,0,0,2,3})){
-                e->reset();e->enable_timing(mode!=0,false,mode>=2,mode==2?32:1);
+                e->reset();e->enable_timing(mode!=0,mode>=2,mode==2?32:1);
                 for(int i=0;i<52;++i){auto start=Clock::now();auto batch=e->interpolate_pair(fa,fb,pts);dev.wait();double wall=elapsed(start);auto t=e->pair_timing().rife?*e->pair_timing().rife:RifeTiming{};
                     if(expected>=0)require(batch.quality.scene_cut==bool(expected),"Scene decision changed");
                     if(i>=12){if(t.enabled)kept[t.pair]={phases,mode};pairs<<id<<','<<phases<<','<<mode<<','<<i<<','<<t.pair<<','<<wall<<','<<batch.quality.scene_cut<<','<<batch.quality.identical_warp_skipped<<','<<t.phase_count<<','<<t.initialize_cpu_ms<<','<<t.guide_submit_cpu_ms<<','<<t.query_collect_cpu_ms<<','<<t.cuda_invalid<<','<<t.d3d_invalid<<','<<t.d3d_skipped<<','<<t.cuda_skipped<<'\n';}

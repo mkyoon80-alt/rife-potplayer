@@ -14,7 +14,7 @@ int wmain(int argc,wchar_t** argv){try{
             std::vector<std::vector<int64_t>> rounds{{200000},{100000,200000,300000},{133337,266663},{100000,200000,300000}};
             if(w==640){rounds.push_back({1,80000,100000,133337,200000,240000,300000,320000,399999});std::vector<int64_t> many;for(int k=1;k<=32;++k)many.push_back(k*12000);rounds.push_back(many);}
             for(size_t r=0;r<rounds.size();++r){
-                if(r==3)e->reset();if(r==2)e->enable_timing(true,false,true);
+                if(r==3)e->reset();if(r==2)e->enable_timing(true,true);
                 auto before=MotionSynthesizer::handoff_count();auto output=e->interpolate_pair(fa,fb,rounds[r]);dev.wait();
                 require(output.frames.size()==rounds[r].size(),"Missing batch output");
                 const auto expected=batched?(rounds[r].size()+3)/4:rounds[r].size();

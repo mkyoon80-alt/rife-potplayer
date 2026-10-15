@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — playback cleanup
+
+- Keep playback state publication asynchronous; only final Stop waits for the latest status snapshot to reach disk.
+- Reuse owned NV12/P010 source plane views during RIFE preparation, with the existing fallback for external surfaces.
+- Remove the unused generic GPU timeline/capture path; retain sampled RIFE TensorRT, CUDA, D3D11 and CPU diagnostics.
+- Preserve startup preparation (100ms), seek preview (50ms), output scheduling, renderer sample ownership and interpolation math.
+- Validated with 28 automated tests, 800 identical output hashes from 20 source-video pairs and 3 additional cut cases, and DirectShow startup/seek/lifecycle/HDR checks. Renderer/VSR drop counts require a separate PotPlayer comparison.
+
 ## v0.1.0-beta — 2026-10-15
 
 - First public standalone Windows x64 release of RIFE for PotPlayer.

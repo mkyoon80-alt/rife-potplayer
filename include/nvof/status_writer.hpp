@@ -55,16 +55,17 @@ public:
         {std::lock_guard<std::mutex> guard(mutex_);stopping_=true;}
         changed_.notify_all();thread_.join();
     }
-    void publish(std::filesystem::path directory,std::string text) {
+    void publish(std::filesystem::path directory,std::string text,bool settle=false) {
         {
             std::lock_guard<std::mutex> guard(mutex_);
             if(stopping_)return;
             pending_=StatusSnapshot{status_detail::next_sequence.fetch_add(1),std::move(directory),std::move(text)};
         }
         changed_.notify_all();
+        if(settle)drain();
     }
-    // Used for state transitions/control teardown, never periodic playback
-    // telemetry. It also keeps a completed Stop visible to status readers.
+    // Only explicit control teardown waits for publication. Playback state
+    // transitions use the same latest-only asynchronous path as periodic data.
     void drain() {
         std::unique_lock<std::mutex> guard(mutex_);
         changed_.wait(guard,[this]{return !busy_&&!pending_;});
