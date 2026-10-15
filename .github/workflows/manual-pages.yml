@@ -1,0 +1,44 @@
+name: Publish manuals
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/manual.*'
+      - 'docs/assets/**'
+      - '.github/workflows/manual-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/configure-pages@v5
+      - name: Prepare Korean home page and bilingual manuals
+        run: |
+          mkdir -p _site/assets
+          cp docs/manual.ko.html _site/index.html
+          cp docs/manual.ko.html docs/manual.en.html docs/manual.css _site/
+          cp docs/assets/*.png _site/assets/
+          touch _site/.nojekyll
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+      - name: Deploy manuals
+        id: deployment
+        uses: actions/deploy-pages@v4

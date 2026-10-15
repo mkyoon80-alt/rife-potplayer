@@ -6,7 +6,7 @@ Real-time 8K 240fps interpolation for PotPlayer, powered by RIFE and native D3D1
 
 **GPU support: NVIDIA GeForce RTX 50 series only.** RTX 5090 is tested; normal operation on RTX 5080 has been confirmed by the user. RTX 30 series did not work in the user’s test and is unsupported. Other GPU series are outside this release’s support scope. The 8K 60fps ×4 performance result applies to RTX 5090 only.
 
-[Download the standalone ZIP](https://github.com/mkyoon80-alt/rife-potplayer/releases/tag/v0.2.0) · [한국어](README.md) · [English HTML manual](docs/manual.en.html) · [한글 HTML 매뉴얼](docs/manual.ko.html)
+[Download the standalone ZIP](https://github.com/mkyoon80-alt/rife-potplayer/releases/tag/v0.2.0) · [한국어](README.md) · [English HTML manual](https://mkyoon80-alt.github.io/rife-potplayer/manual.en.html) · [한글 HTML 매뉴얼](https://mkyoon80-alt.github.io/rife-potplayer/)
 
 The release ZIP includes the .NET/WPF runtime, NVIDIA inference runtime, model, engine preparation tool and both offline HTML manuals. Extract the entire folder and open **RifeControl.exe**. No Python, VapourSynth or separate .NET installation is required. PotPlayer x64 and a compatible NVIDIA driver are required. The application UI is currently Korean; the English manual explains every main control.
 
@@ -17,7 +17,7 @@ The release ZIP includes the .NET/WPF runtime, NVIDIA inference runtime, model, 
 3. In PotPlayer's **Preferences → Filter Control → Global Filter Priority**, add **RIFE for PotPlayer**, enable it and select highest priority / Prefer. Do not enable another interpolation filter at the same time.
 4. Reopen a video and check the active state and input → output FPS. The default output cap is 60fps.
 
-Registration alone does not select the filter in PotPlayer. Read `docs/manual.en.html` or `docs/manual.ko.html` locally after extracting; GitHub displays HTML source rather than rendering the manual.
+Registration alone does not select the filter in PotPlayer. Read the online manuals using the links above, or open `docs/manual.en.html` or `docs/manual.ko.html` locally after extracting for offline reading.
 
 ## Processing
 

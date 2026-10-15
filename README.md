@@ -8,7 +8,7 @@
 
 RTX 5090에서 8K 60fps ×4 → 240fps를 시험한 팟플레이어용 RIFE 보간 필터입니다. 최대 긴 변 960에서 구한 움직임·혼합 마스크로 원본 해상도의 픽셀을 합성합니다.
 
-[독립 실행 ZIP 다운로드](https://github.com/mkyoon80-alt/rife-potplayer/releases/tag/v0.2.0) · [한글 HTML 매뉴얼](docs/manual.ko.html) · [English HTML manual](docs/manual.en.html)
+[독립 실행 ZIP 다운로드](https://github.com/mkyoon80-alt/rife-potplayer/releases/tag/v0.2.0) · [한글 HTML 매뉴얼](https://mkyoon80-alt.github.io/rife-potplayer/) · [English HTML manual](https://mkyoon80-alt.github.io/rife-potplayer/manual.en.html)
 
 ZIP 전체를 압축 해제한 뒤 **RifeControl.exe**를 실행하세요. .NET·Python·VapourSynth를 따로 설치할 필요가 없습니다. 팟플레이어 64bit와 호환 NVIDIA 드라이버는 별도로 필요합니다.
 
@@ -17,7 +17,7 @@ ZIP 전체를 압축 해제한 뒤 **RifeControl.exe**를 실행하세요. .NET�
 3. 팟플레이어 **F5 → 코덱/필터 → 전역 필터 우선 순위 → 시스템 코덱 추가**에서 **RIFE for PotPlayer**를 활성화하고 **최우선 사용** 선택
 4. 영상을 다시 열고 **프레임 보간 동작 중**과 출력 FPS 확인
 
-기본 출력 상한은 60fps입니다. 매뉴얼은 압축 해제한 폴더의 `docs/manual.ko.html` 또는 `docs/manual.en.html`을 브라우저로 여세요. GitHub에서는 HTML 소스로 표시됩니다.
+기본 출력 상한은 60fps입니다. 위 링크에서 매뉴얼을 바로 읽을 수 있습니다. 인터넷 없이 읽으려면 압축 해제한 폴더의 `docs/manual.ko.html` 또는 `docs/manual.en.html`을 브라우저로 여세요.
 
 엔진은 PC 환경에 맞춰 한 번 준비하고 파일마다 재사용합니다. 재생·탐색 중에는 엔진을 컴파일하지 않습니다. 현재 배포본은 RTX 50 시리즈용 SM120 / PTX 빌더 리소스를 포함합니다. 지원 GPU에서 엔진 검사를 실행하고 필요하면 재준비하세요. 엔진 재준비가 RTX 30 등 다른 시리즈의 지원을 보장하지는 않습니다.
 
