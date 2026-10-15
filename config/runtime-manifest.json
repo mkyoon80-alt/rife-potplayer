@@ -1,0 +1,13 @@
+{
+  "TensorRT": "10.16.0.72",
+  "files": {
+    "cudart64_13.dll": "7c50bf7f7398b5d1b654af19ff6a679988cf251cab677dbd8abac69fa1cce310",
+    "msvcp140.dll": "6e7bcb4ffac2ac140bf7bcc6de529ee196dc377bbdb44bbd15e96184a219444b",
+    "nvinfer_10.dll": "673963c7080cd2aaaed8952323fa50959bfba7b445d8f839174d22cf104c6117",
+    "nvinfer_plugin_10.dll": "92c535753fb989a495bde05774719abb12dd5fa2b727a0f8a9b805b92fd91069",
+    "nvrtc-builtins64_132.dll": "b1a3f27ae868e40b2fd6b846bae9488478d735b35fe96baf5d1808ebde2ff12f",
+    "nvrtc64_130_0.dll": "d9adefe6df8a585ddbfabeab4a3a374d7601faf32d31316df933be71bcb14240",
+    "vcruntime140.dll": "b5d987e71a38f752b5507e454782d01fecc02e05616779e1938125ae4593cfa2",
+    "vcruntime140_1.dll": "c030847413cafac126b0b47eca9aac64ce6311577ab7c8b32f80c249cb8a2f73"
+  }
+}

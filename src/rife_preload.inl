@@ -1,0 +1,43 @@
+// Optional work during graph connection, never a condition for Run or first
+// original delivery. Only CUDA/TRT objects are prepared; no D3D context commands.
+std::atomic<uint64_t> preload_jobs{0};
+struct PreloadRequest {
+    std::filesystem::path directory;
+    ComPtr<ID3D11Device> device;
+    HMODULE module=nullptr;
+};
+std::mutex& preload_mutex(){static std::mutex value;return value;}
+std::set<std::wstring>& preload_keys(){static std::set<std::wstring> value;return value;}
+DWORD WINAPI preload_entry(void* argument){
+    HMODULE module=nullptr;
+    {
+        std::unique_ptr<PreloadRequest> request(static_cast<PreloadRequest*>(argument));
+        module=request->module;
+        try{int gpu=-1;auto shared=cached_engine(request->directory,request->device.Get(),gpu);shared->prewarm_context();}
+        catch(const std::exception& error){OutputDebugStringA((std::string("RIFE optional startup preparation: ")+error.what()+"\n").c_str());}
+        catch(...){OutputDebugStringA("RIFE optional startup preparation failed; lazy initialization remains available\n");}
+    }
+    --preload_jobs;
+    // Keep this DLL loaded until the thread has left its code, including when
+    // the player abandons a graph while preparation is still in progress.
+    FreeLibraryAndExitThread(module,0);
+}
+bool request_preload(const std::filesystem::path& directory,ID3D11Device* device)noexcept{
+    if(!device||environment_flag(L"RIFE_DISABLE_STARTUP_PRELOAD"))return false;
+    HMODULE module=nullptr;
+    try{
+        ComPtr<IDXGIDevice> dxgi;ComPtr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC desc{};
+        ck(device->QueryInterface(IID_PPV_ARGS(&dxgi)),"Preload DXGI device");ck(dxgi->GetAdapter(&adapter),"Preload adapter");ck(adapter->GetDesc(&desc),"Preload adapter identity");
+        if(desc.VendorId!=0x10de)return false;
+        auto dir=std::filesystem::absolute(directory).lexically_normal();
+        const auto key=dir.wstring()+L"/"+std::to_wstring(desc.AdapterLuid.HighPart)+L"/"+std::to_wstring(desc.AdapterLuid.LowPart);
+        std::lock_guard<std::mutex> lock(preload_mutex());
+        if(preload_keys().count(key))return true;
+        if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,reinterpret_cast<LPCWSTR>(&preload_entry),&module))return false;
+        auto request=std::make_unique<PreloadRequest>();request->directory=std::move(dir);request->device=device;request->module=module;
+        preload_keys().insert(key);++preload_jobs;
+        HANDLE thread=CreateThread(nullptr,0,preload_entry,request.get(),0,nullptr);
+        if(!thread){--preload_jobs;preload_keys().erase(key);FreeLibrary(module);return false;}
+        request.release();module=nullptr;CloseHandle(thread);return true;
+    }catch(...){if(module)FreeLibrary(module);return false;}
+}

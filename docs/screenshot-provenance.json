@@ -1,0 +1,17 @@
+[
+  {
+    "file": "assets/interpolation.png",
+    "origin": "User-supplied RIFE for PotPlayer settings screenshot; supplied for this release manual. Not an NVOF screenshot.",
+    "sha256": "ad4cd26ca82e2d50d04aba24ea599bed52f0fa1e0f24f565b49f1934f1c02002"
+  },
+  {
+    "file": "assets/connection.png",
+    "origin": "User-supplied RIFE for PotPlayer settings screenshot; supplied for this release manual. Not an NVOF screenshot.",
+    "sha256": "24bac85311650f2893ee76167dfde79a7008fe43473af85d37fe9d44dde321bc"
+  },
+  {
+    "file": "assets/diagnostics.png",
+    "origin": "User-supplied RIFE for PotPlayer settings screenshot; supplied for this release manual. Not an NVOF screenshot.",
+    "sha256": "f9ee6c63e1ec565ab9377f9c0a6c67cb3b04cef3cfc8e3b6542fc00ebea4784b"
+  }
+]
