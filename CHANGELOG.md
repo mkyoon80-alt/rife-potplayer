@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.1 — 2026-10-17
+
+- Add the 160fps cap to common and per-resolution output settings. Integer-multiple behavior is preserved: 24→144, 30→150, 60→120fps; this setting does not change monitor refresh rate.
+- Fix doubled source FPS for progressive HEVC/P010 video incorrectly advertised as interlaced by the upstream decoder, including the reproduced PotPlayer built-in FFmpeg / 10-bit output case. At a 120fps cap, the affected 23.976fps source now outputs 119.88fps instead of 95.904fps.
+- Apply the correction only when HEVC sequence headers explicitly establish progressive-only content. Actual interlaced, mixed, unspecified, contradictory and malformed headers retain the existing behavior. A genuine 47.952fps source is not blindly halved.
+- Preserve RIFE 4.25 Standard, TensorRT FP16, 960 guide, original-resolution composition, 10-bit/HDR paths, 100ms startup preparation and 50ms seek preview. No settings migration or default changes are required.
+- Regression comparison of the fix passed 29 local automated tests and 59 DirectShow graph cases, including actual decoded HEVC/H.264 interlaced samples; 800 interpolation hashes, 1,196 sequence output hashes and 12 scene-cut source checks matched their references. This is filter-level coverage, not a new end-to-end PotPlayer performance claim. Correcting the affected clip increases intended output work from 95.904 to 119.88fps (+25%).
+- Update Korean/English manuals with the 160fps option, HEVC FPS troubleshooting, the exact PotPlayer 10-bit checkbox and settings-preserving update instructions. Native/UI version is 0.2.1.0.
+
 ## v0.2.0 — 2026-10-15
 
 - First stable release. GPU support is limited to RTX 50 series: RTX 5090 tested; RTX 5080 normal operation user-confirmed. RTX 30 series is unsupported.

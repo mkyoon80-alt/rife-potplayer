@@ -8,6 +8,7 @@
 
 CMediaType cpu_media;
 bool cpu_avc_sps=false,cpu_avc_interlaced=false;
+std::vector<uint8_t> cpu_hevc_sequence;
 bool cpu_weave=false,cpu_mixed=false;
 bool cpu_hdr_fixture=false,cpu_hdr_reconnect=false;
 bool cpu_offered_allocator=false;
@@ -67,8 +68,8 @@ public:
     CpuEncodedPin(CBaseFilter* f,CCritSec* l,HRESULT* h):CBaseInputPin(NAME("AVC input facts"),f,l,h,L"Compressed"){}
     HRESULT CheckMediaType(const CMediaType*) override {return S_OK;}
     STDMETHODIMP ConnectionMediaType(AM_MEDIA_TYPE* media) override {
-        if(cpu_hdr_fixture) {
-            auto seq=hevc_fixture::hvcc(cpu_hdr_transfer==MFVideoTransFunc_HLG?18:16);CMediaType type;type.SetType(&MEDIATYPE_Video);
+        if(cpu_hdr_fixture || !cpu_hevc_sequence.empty()) {
+            auto seq=cpu_hevc_sequence.empty()?hevc_fixture::hvcc(cpu_hdr_transfer==MFVideoTransFunc_HLG?18:16):cpu_hevc_sequence;CMediaType type;type.SetType(&MEDIATYPE_Video);
             GUID codec=MEDIASUBTYPE_NV12;codec.Data1=MAKEFOURCC('H','V','C','1');type.SetSubtype(&codec);type.SetFormatType(&FORMAT_MPEG2Video);
             const size_t bytes=offsetof(MPEG2VIDEOINFO,dwSequenceHeader)+seq.size();
             auto* h=reinterpret_cast<MPEG2VIDEOINFO*>(type.AllocFormatBuffer(ULONG(bytes)));if(!h)return E_OUTOFMEMORY;
@@ -88,8 +89,8 @@ public:
 class CpuSource final : public CBaseFilter {
 public:
     CpuSource(HRESULT* h):CBaseFilter(NAME("Software decoder fixture"),nullptr,&lock_,CLSID_NULL),pin_(this,&lock_,h),encoded_(this,&lock_,h){}
-    int GetPinCount() override{return cpu_avc_sps || cpu_hdr_fixture?2:1;}
-    CBasePin* GetPin(int n) override{return n==0?static_cast<CBasePin*>(&pin_):n==1 && (cpu_avc_sps || cpu_hdr_fixture)?&encoded_:nullptr;}
+    int GetPinCount() override{return cpu_avc_sps || cpu_hdr_fixture || !cpu_hevc_sequence.empty()?2:1;}
+    CBasePin* GetPin(int n) override{return n==0?static_cast<CBasePin*>(&pin_):n==1 && (cpu_avc_sps || cpu_hdr_fixture || !cpu_hevc_sequence.empty())?&encoded_:nullptr;}
     CpuPin pin_;
 private:CCritSec lock_;CpuEncodedPin encoded_;
 };
@@ -194,6 +195,10 @@ int wmain(int argc,wchar_t** argv) {
                 throw std::runtime_error("CPU HDR color signalling lost");
         }
         ComPtr<IMediaControl> control;check(graph.As(&control),"control");check(control->Run(),"Run CPU upload");
+        // These exact-count/pixel assertions describe steady playback. The
+        // separate startup tests cover the 100-ms original-only window; cold
+        // GPU initialization must not decide how many phases this test sees.
+        if(!performance)Sleep(150);
         // Must keep an ordinary upstream allocator after activating GPU output.
         ComPtr<IMemInputPin> mem;check(in.As(&mem),"input memory");ComPtr<IMemAllocator> allocator;check(mem->GetAllocator(&allocator),"CPU allocator retained");
         std::vector<uint8_t> frame(bytes,0xcc);std::vector<uint16_t> expected;size_t exact=0,total=0,lowbits=0;

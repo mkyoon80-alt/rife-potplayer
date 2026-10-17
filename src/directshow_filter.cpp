@@ -3,6 +3,7 @@
 #include "nvof/cpu_upload.hpp"
 #include "nvof/avc_depth.hpp"
 #include "nvof/hevc_color.hpp"
+#include "nvof/hevc_scan.hpp"
 #include "nvof/av1_color.hpp"
 #include "nvof/vp9_color.hpp"
 #include "nvof/input_height_policy.hpp"
@@ -72,7 +73,7 @@ const CLSID CLSID_RifePropertyPage =
 
 namespace {
 constexpr REFERENCE_TIME kUnits = 10000000;
-constexpr char kFilterBuild[]="0.2.0";
+constexpr char kFilterBuild[]="0.2.1";
 // Public LAV/renderer COM contracts. Probing them never advertises support.
 // https://github.com/Nevcairiel/LAVFilters/blob/master/include/ID3DVideoMemoryConfiguration.h
 const IID kD3D11DecoderConfiguration =
@@ -238,6 +239,7 @@ struct Layout {
     nvof::CpuVideoFormat cpu_format=nvof::CpuVideoFormat::p010;
     bool interlaced=false,top_first=false;
     REFERENCE_TIME sample_duration=0;
+    bool hevc_progressive_override=false;
 };
 
 bool parse_layout(const CMediaType& media, Layout& layout) noexcept {
@@ -1099,10 +1101,51 @@ public:
         }catch(...){}
         return {};
     }
+    bool upstream_hevc_progressive_only() const noexcept {
+        try {
+            Microsoft::WRL::ComPtr<IPin> upstream;
+            if(!m_pInput)return false;
+            if(FAILED(m_pInput->ConnectedTo(&upstream)))upstream=static_cast<ProbeInputPin*>(m_pInput)->candidate;
+            if(!upstream)return false;
+            PIN_INFO info{};if(FAILED(upstream->QueryPinInfo(&info)) || !info.pFilter)return false;
+            Microsoft::WRL::ComPtr<IBaseFilter> decoder;decoder.Attach(info.pFilter);
+            Microsoft::WRL::ComPtr<IEnumPins> pins;if(FAILED(decoder->EnumPins(&pins)))return false;
+            Microsoft::WRL::ComPtr<IPin> pin;bool found=false;
+            for(unsigned i=0;i<64;++i,pin.Reset()) {
+                const HRESULT next=pins->Next(1,&pin,nullptr);
+                if(next==S_FALSE)return found;
+                if(next!=S_OK || !pin)return false;
+                PIN_DIRECTION direction{};CMediaType mt;
+                if(FAILED(pin->QueryDirection(&direction)))return false;
+                if(direction!=PINDIR_INPUT)continue;
+                if(FAILED(pin->ConnectionMediaType(&mt)))continue;
+                if(mt.majortype!=MEDIATYPE_Video)continue;
+                const GUID base={mt.subtype.Data1,0,0x10,{0x80,0,0,0xaa,0,0x38,0x9b,0x71}};
+                const auto c=mt.subtype.Data1;
+                if(mt.subtype!=base ||
+                   (c!=MAKEFOURCC('H','V','C','1') && c!=MAKEFOURCC('h','v','c','1') &&
+                    c!=MAKEFOURCC('H','E','V','1') && c!=MAKEFOURCC('h','e','v','1') &&
+                    c!=MAKEFOURCC('H','E','V','C') && c!=MAKEFOURCC('h','e','v','c')))return false;
+                if(!mt.pbFormat || mt.formattype!=FORMAT_MPEG2Video || mt.cbFormat<offsetof(MPEG2VIDEOINFO,dwSequenceHeader))return false;
+                const auto* h=reinterpret_cast<const MPEG2VIDEOINFO*>(mt.pbFormat);
+                if(h->cbSequenceHeader>mt.cbFormat - offsetof(MPEG2VIDEOINFO,dwSequenceHeader) ||
+                   !nvof::hevc_progressive_only(reinterpret_cast<const BYTE*>(h->dwSequenceHeader),h->cbSequenceHeader))return false;
+                found=true;
+            }
+        }catch(...){}
+        return false;
+    }
     bool parse_input_layout(const CMediaType& media,Layout& layout) const noexcept {
         if(!parse_layout(media,layout))return false;
         if(layout.interlaced && upstream_avc_format().frame_mbs_only==true) {
             layout.interlaced=false;layout.top_first=false;layout.duration=layout.sample_duration;
+        }
+        // Some HEVC decoders advertise interlace-capable P010 for progressive
+        // pictures. Resolve this before choosing the multiplier/renderer clock,
+        // not after samples arrive. Unknown/mixed/field-coded SPS stays intact.
+        if(layout.interlaced && upstream_hevc_progressive_only()) {
+            layout.interlaced=false;layout.top_first=false;layout.duration=layout.sample_duration;
+            layout.hevc_progressive_override=true;
         }
         return true;
     }
@@ -1263,7 +1306,8 @@ public:
         write_log(std::string("stream start: ")+(input_.ten_bit?"P010 ":"NV12 ") + std::to_string(input_.width) + "x" +
             std::to_string(input_.height) + " target=" + std::to_string(target_.num) +
             "/" + std::to_string(target_.den) + " inputRateGroup="+input_rate_group()+
-            " InputRateMask="+std::to_string(input_rate_mask_)+" DoubleRate="+std::to_string(selected_multiple(input_.duration)==2)+" bypassReason="+bypass_reason());
+            " InputRateMask="+std::to_string(input_rate_mask_)+" DoubleRate="+std::to_string(selected_multiple(input_.duration)==2)+" bypassReason="+bypass_reason()+
+            " inputInterlaced="+std::to_string(input_.interlaced)+" hevcProgressiveOverride="+std::to_string(input_.hevc_progressive_override));
         if(performance_.enabled && m_pOutput) {
             ALLOCATOR_PROPERTIES allocation{};
             const HRESULT allocated=static_cast<nvof::transport::OutputPin*>(m_pOutput)->allocator_properties(&allocation);
@@ -2334,6 +2378,8 @@ private:
                     << ",\"inputRateGroup\":" << json_string(input_rate_group())
                     << ",\"bypassReason\":" << json_string(bypass_reason())
                     << ",\"inputFps\":" << input_fps
+                    << ",\"inputInterlaced\":" << (input_.interlaced?"true":"false")
+                    << ",\"hevcProgressiveOverride\":" << (input_.hevc_progressive_override?"true":"false")
                     << ",\"outputFps\":" << output_fps
                     << ",\"outputFrames\":" << output_frames_
                     << ",\"sourceFrames\":" << source_frames_

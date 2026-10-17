@@ -33,7 +33,7 @@ namespace RifeControl
         public int TracePerformance { get { return (int)GetPrivateProfileInt("Rife", "TracePerformance", 0, path); } }
         public int TraceSampleInterval { get { return (int)Math.Clamp(GetPrivateProfileInt("Rife", "TraceSampleInterval", 32, path), 1u, 1024u); } }
         public bool Enabled { get { return GetPrivateProfileInt("Rife", "Enabled", 1, path) != 0; } }
-        public static readonly int[] OutputLimits = {60,72,75,100,120,144,240};
+        public static readonly int[] OutputLimits = {60,72,75,100,120,144,160,240};
         public int OutputFpsLimit { get { int value=(int)GetPrivateProfileInt("Rife", "OutputFpsLimit", 60, path); return Array.IndexOf(OutputLimits,value)>=0?value:60; } }
         public int OutputMode { get { return GetPrivateProfileInt("Rife", "OutputMode", 0, path)==1?1:0; } }
         public int OutputMultiplier { get { int value=(int)GetPrivateProfileInt("Rife", "OutputMultiplier", 2, path); return value>=2&&value<=5?value:2; } }

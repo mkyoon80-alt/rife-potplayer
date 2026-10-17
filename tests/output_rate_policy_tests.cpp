@@ -66,13 +66,19 @@ int main() {
             "60.006 fps must bypass at 60 and double at 120");
         // Published UI choices: caps retain source originals and direct modes
         // ignore the remembered cap. Invalid new keys preserve old defaults.
-        const int caps[]={60,72,75,100,120,144,240};
-        const int expected24[]={2,3,3,4,5,6,10},expected25[]={2,2,3,4,4,5,9};
-        for(int i=0;i<7;++i) {
+        const int caps[]={60,72,75,100,120,144,160,240};
+        const int expected24[]={2,3,3,4,5,6,6,10},expected25[]={2,2,3,4,4,5,6,9};
+        for(size_t i=0;i<sizeof(caps)/sizeof(caps[0]);++i) {
             require(nvof::output_multiple(416667,caps[i])==expected24[i],"24p expanded cap mismatch");
             require(nvof::output_multiple(400000,caps[i])==expected25[i],"25p expanded cap mismatch");
             require(nvof::output_multiple(10000000,caps[i])<=33,"Expanded cap exceeds phase pool");
         }
+        const auto ntsc160=nvof::capped_source_rate(417083,160);
+        require(ntsc160.num==144000 && ntsc160.den==1001,"160 cap must preserve NTSC cadence");
+        require(nvof::output_multiple(333333,160)==5,"30p at cap 160 must produce 150 fps");
+        require(nvof::output_multiple(200000,160)==3,"50p at cap 160 must produce 150 fps");
+        require(nvof::output_multiple(166667,160)==2,"60p at cap 160 must produce 120 fps");
+        require(nvof::output_multiple(125000,160)==2,"80p at cap 160 must produce 160 fps");
         for(int multiple=2;multiple<=5;++multiple)for(int64_t duration:{417083LL,416667LL,400000LL,333300LL,166667LL}) {
             const auto source=nvof::canonical_source_rate(duration);
             const auto rate=nvof::selected_output_rate(duration,1,60,multiple);

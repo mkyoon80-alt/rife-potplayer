@@ -2,13 +2,13 @@
 
 [English](README.en.md)
 
-**v0.2.0 · Windows x64 · RIFE 4.25 Standard**
+**v0.2.1 · Windows x64 · RIFE 4.25 Standard**
 
 **지원 GPU는 NVIDIA GeForce RTX 50 시리즈뿐입니다.** RTX 5090은 검증 완료, RTX 5080은 사용자 정상 구동 확인 상태입니다. RTX 30 시리즈는 사용자 테스트에서 동작하지 않아 지원하지 않습니다. 그 외 GPU 시리즈도 이번 배포본의 지원 대상이 아닙니다. 8K 60fps ×4 성능 검증은 RTX 5090 기준입니다.
 
 RTX 5090에서 8K 60fps ×4 → 240fps를 시험한 팟플레이어용 RIFE 보간 필터입니다. 최대 긴 변 960에서 구한 움직임·혼합 마스크로 원본 해상도의 픽셀을 합성합니다.
 
-[독립 실행 ZIP 다운로드](https://github.com/mkyoon80-alt/rife-potplayer/releases/tag/v0.2.0) · [한글 HTML 매뉴얼](https://mkyoon80-alt.github.io/rife-potplayer/) · [English HTML manual](https://mkyoon80-alt.github.io/rife-potplayer/manual.en.html)
+[독립 실행 ZIP 다운로드](https://github.com/mkyoon80-alt/rife-potplayer/releases/tag/v0.2.1) · [한글 HTML 매뉴얼](https://mkyoon80-alt.github.io/rife-potplayer/) · [English HTML manual](https://mkyoon80-alt.github.io/rife-potplayer/manual.en.html)
 
 ZIP 전체를 압축 해제한 뒤 **RifeControl.exe**를 실행하세요. .NET·Python·VapourSynth를 따로 설치할 필요가 없습니다. 팟플레이어 64bit와 호환 NVIDIA 드라이버는 별도로 필요합니다.
 
@@ -24,5 +24,11 @@ ZIP 전체를 압축 해제한 뒤 **RifeControl.exe**를 실행하세요. .NET�
 초기 원본 준비는 실제시간 100ms, 탐색 직후 원본 표시 기준은 50ms입니다. 상세 진단은 32쌍마다 표본을 기록합니다. 재생 중 진단 텍스트 갱신으로 스크롤과 선택 영역이 초기화되던 문제를 수정했습니다.
 
 8K 실시간 시험은 모든 영상·PC에서 무드랍을 보장하는 뜻이 아닙니다. 남은 초기 드랍과 VSR 동시 사용 시 GPU 경합은 장기 개선 과제입니다. Dolby Vision은 메타데이터 전달을 검증한 범위이며 모든 프로파일·FEL·디스플레이 출력을 보증하지 않습니다. HDR10+ 동적 메타데이터 전달은 미구현입니다.
+
+v0.2.1은 공통·해상도별 출력 상한에 **160fps**를 추가하고, 일부 HEVC 10비트 영상의 원본 FPS가 두 배로 인식되던 문제를 수정했습니다. 예를 들어 23.976fps 영상이 47.952fps로 표시되던 경우, 상한 120에서 올바른 **23.976 → 119.88fps**로 보간합니다. 실제 인터레이스 입력은 기존 처리 경로를 유지합니다.
+
+160fps는 정수배 출력의 상한입니다. 24fps는 144fps, 30fps는 150fps, 60fps는 120fps로 출력하며 모니터 주사율을 변경하지 않습니다. 팟플레이어 **F5 → 영상 → 비디오 버퍼 포맷 옆 ‘10비트 출력’**을 켠 구성에서 확인한 FPS 오인식을 수정한 것으로, 10비트 출력이나 HDR을 강제로 켜는 업데이트는 아닙니다. 기존 설정을 유지하고 영상을 다시 여세요.
+
+업데이트 전 팟플레이어와 설정창을 닫고 기존 폴더를 백업하세요. 새 ZIP을 별도 폴더에 풀고, 기존 `RifeStandardPotPlayer.ini`를 새 폴더에 복사하면 설정을 유지할 수 있습니다. 이전 폴더에서 등록을 해제한 뒤 새 폴더에서 엔진 검사와 필터 등록을 진행하세요. 자세한 순서는 매뉴얼의 업데이트 항목을 참고하세요.
 
 [빌드 안내](docs/BUILDING.md) · [변경 사항](CHANGELOG.md) · [라이선스 고지](THIRD_PARTY_NOTICES.md)

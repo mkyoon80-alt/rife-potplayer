@@ -19,6 +19,10 @@ int main() {
             const auto common=resolve_resolution_output(height,false,rules,1,75,5);
             require(common.mode==1 && common.multiplier==5 && common.limit==75 && !common.disabled && common.rule==0,"off changed common setting");
         }
+        const auto cap160rules=parse_resolution_rules("0,0,0,160,0,0,0");
+        const auto cap160=resolve_resolution_output(1080,true,cap160rules,0,60,2);
+        require(cap160.limit==160 && cap160.rule==160,"160 fps per-resolution cap lost");
+        require(selected_output_multiple(333333,cap160.mode,cap160.limit,cap160.multiplier)==5,"160 fps resolution rule fell back to 60");
         require(resolve_resolution_output(800,true,rules,0,60,2).limit==144,"1920x800 must use height not width");
         const auto hd=resolve_resolution_output(1080,true,rules,1,60,2);
         const auto uhd=resolve_resolution_output(2160,true,rules,0,240,5);

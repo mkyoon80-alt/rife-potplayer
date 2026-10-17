@@ -2,11 +2,11 @@
 
 Real-time 8K 240fps interpolation for PotPlayer, powered by RIFE and native D3D11. Tested at 8K 60fps ×4 on RTX 5090.
 
-**v0.2.0 · Windows x64 · RIFE 4.25 Standard**
+**v0.2.1 · Windows x64 · RIFE 4.25 Standard**
 
 **GPU support: NVIDIA GeForce RTX 50 series only.** RTX 5090 is tested; normal operation on RTX 5080 has been confirmed by the user. RTX 30 series did not work in the user’s test and is unsupported. Other GPU series are outside this release’s support scope. The 8K 60fps ×4 performance result applies to RTX 5090 only.
 
-[Download the standalone ZIP](https://github.com/mkyoon80-alt/rife-potplayer/releases/tag/v0.2.0) · [한국어](README.md) · [English HTML manual](https://mkyoon80-alt.github.io/rife-potplayer/manual.en.html) · [한글 HTML 매뉴얼](https://mkyoon80-alt.github.io/rife-potplayer/)
+[Download the standalone ZIP](https://github.com/mkyoon80-alt/rife-potplayer/releases/tag/v0.2.1) · [한국어](README.md) · [English HTML manual](https://mkyoon80-alt.github.io/rife-potplayer/manual.en.html) · [한글 HTML 매뉴얼](https://mkyoon80-alt.github.io/rife-potplayer/)
 
 The release ZIP includes the .NET/WPF runtime, NVIDIA inference runtime, model, engine preparation tool and both offline HTML manuals. Extract the entire folder and open **RifeControl.exe**. No Python, VapourSynth or separate .NET installation is required. PotPlayer x64 and a compatible NVIDIA driver are required. The application UI is currently Korean; the English manual explains every main control.
 
@@ -34,6 +34,12 @@ Startup preparation stays at **100ms of wall-clock time**, showing originals whi
 HDR10/HLG metadata paths are tested. Dolby Vision coverage is decoder-provided metadata forwarding, not full profile/FEL/display certification. HDR10+ dynamic metadata forwarding is not implemented. See the manuals for color-format limitations.
 
 ## Development and credits
+
+v0.2.1 adds a **160fps** cap to both common and per-resolution output settings and fixes source FPS being doubled for some progressive HEVC 10-bit videos. A 23.976fps source previously reported as 47.952fps now correctly interpolates **23.976 → 119.88fps** at a 120fps cap. Actual interlaced inputs retain their existing processing path.
+
+The 160fps option is an integer-multiple cap: 24fps outputs 144fps, 30fps outputs 150fps, and 60fps outputs 120fps. It does not change the monitor refresh rate. The FPS issue was reproduced with PotPlayer's **F5 → Video → ‘10-bit output’ beside Video buffer format** enabled. This update does not force 10-bit output or HDR; keep your existing settings and reopen the video.
+
+Before updating, close PotPlayer and RifeControl and back up the old folder. Extract the new ZIP separately and copy the old `RifeStandardPotPlayer.ini` into it to retain settings. Unregister from the old folder, then check the engine and register from the new folder. See the manual for the complete update steps.
 
 [Build instructions](docs/BUILDING.md) · [Changes](CHANGELOG.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
