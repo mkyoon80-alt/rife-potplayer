@@ -35,6 +35,7 @@ struct GpuPairTiming {
     double event_arm_ms=0,event_sleep_ms=0;
     double decoder_lock_ms=0,multithread_lock_ms=0,state_swap_ms=0;
     double wait_service_ms=0;
+    double target_allocation_ms=0;
     uint32_t wait_service_calls=0;
     uint32_t shared_wait_calls=0,combined_scene_pairs=0;
     uint32_t event_wait_calls=0,query_wait_calls=0;
@@ -68,7 +69,7 @@ public:
     // Boundary originals may be delivered before any later interpolation
     // submission. submit_now flushes their commands without a completion wait.
     GpuFrame copy(const GpuFrame& input, bool submit_now = false);
-    PhaseBatch<GpuFrame> interpolate_pair(const GpuFrame& previous, const GpuFrame& current, const std::vector<int64_t>& timestamps);
+    PhaseBatch<GpuFrame> interpolate_pair(const GpuFrame& previous, const GpuFrame& current, const std::vector<int64_t>& timestamps,const std::atomic<bool>* cancelled = nullptr);
     void reset() noexcept;
     std::string device_name() const;
     bool queued_completion() const;
@@ -81,7 +82,13 @@ public:
     // failure is reported by the caller after GPU completion, before new output.
     using WaitService = std::function<HANDLE()>;
     void set_wait_service(WaitService service);
-    int startup_warmup();
+    int startup_warmup(int width=0,int height=0,bool multiple_outputs=false);
+    bool startup_ready() const;
+    // Quiesced engines only. Retain the host's borrowed-mutex owner until GPU
+    // cleanup completes; never let optional module loading block graph Stop.
+    // False leaves ownership with the caller for ordinary synchronous cleanup.
+    static bool retire_during_preparation(std::unique_ptr<GpuRifeEngine>&,std::shared_ptr<void> host_lifetime) noexcept;
+    static unsigned retirement_pending() noexcept;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -10,13 +10,15 @@ int wmain(int argc,wchar_t** argv) {try {
     require(argc>=4,"directshow_hevc_rate filter.ax case output.csv [raw.p210]");
     const std::wstring kind=argv[2];const bool real=argc==5;
     const bool avc=kind==L"avc-real";
-    const bool fields=kind==L"fields" || kind==L"fields-bff" || kind==L"mixed" || avc;
+    const bool av1=kind.find(L"av1-")==0;
+    const bool fields=kind==L"fields" || kind==L"fields-bff" || kind==L"mixed" || avc || kind.find(L"av1-fields")==0;
     const bool rate48=kind==L"plain48" || kind==L"progressive48";
     kWidth=real?1920:640;kHeight=real?1080:360;kDuration=fields?400000:rate48?208542:417083;
+    if(av1){cpu_av1_case=kind;kDuration=166667;}
     p010_fixture=true;p010_media=true;
     cpu_weave=!fields;cpu_mixed=kind==L"mixed";
     cpu_avc_sps=avc;cpu_avc_interlaced=avc;
-    if(!avc) {
+    if(!avc && !av1) {
         using namespace hevc_scan_fixture;
         Scan scan;
         if(fields)scan={false,true,false,true};
@@ -31,7 +33,7 @@ int wmain(int argc,wchar_t** argv) {try {
     cpu_media=input_type();auto* h=reinterpret_cast<VIDEOINFOHEADER2*>(cpu_media.pbFormat);
     const int pitch=kWidth*2;const size_t bytes=size_t(pitch)*kHeight*(real?2:3)/ (real?1:2);
     if(real){cpu_media.SetSubtype(&nvof::p210_subtype);h->bmiHeader.biCompression=nvof::p210_subtype.Data1;h->bmiHeader.biBitCount=32;h->bmiHeader.biSizeImage=DWORD(bytes);cpu_media.SetSampleSize(ULONG(bytes));}
-    h->dwInterlaceFlags=(kind==L"plain" || kind==L"plain48")?0:AMINTERLACE_IsInterlaced|(kind==L"fields-bff"?0:AMINTERLACE_Field1First);
+    h->dwInterlaceFlags=(kind==L"plain" || kind==L"plain48" || kind==L"av1-plain")?0:AMINTERLACE_IsInterlaced|(kind==L"fields-bff" || kind==L"av1-fields-bff"?0:AMINTERLACE_Field1First);
     check(CoInitializeEx(nullptr,COINIT_MULTITHREADED),"COM");
     HMODULE module=LoadLibraryExW(argv[1],nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);require(module!=nullptr,"load filter");
     auto get=reinterpret_cast<HRESULT(WINAPI*)(REFCLSID,REFIID,void**)>(GetProcAddress(module,"DllGetClassObject"));require(get!=nullptr,"factory export");

@@ -7,8 +7,9 @@ namespace nvof {
 struct RifePhaseTiming {
     uint64_t pair=0;int64_t pts=0;float phase=0;unsigned width=0,height=0;
     bool external_fence=false;
+    bool head_cached=false,head_cache_first=false,packed_layout=false;
     bool cuda_valid=false,cuda_pending=false,graph_replayed=false,graph_created=false;
-    unsigned batch_size=1,map_count=0,unmap_count=0;
+    unsigned batch_size=1,map_count=0,unmap_count=0,copy_count=0;
     double copy_cpu_ms=0,copy_gpu_ms=0;
     double status_query_cpu_ms=0;
     double time_submit_cpu_ms=0,device_cpu_ms=0,map_cpu_ms=0,bind_cpu_ms=0;
@@ -27,6 +28,8 @@ struct RifeTiming {
     bool enabled=false;uint64_t pair=0;int64_t pts=0;
     double initialize_cpu_ms=0,guide_submit_cpu_ms=0,query_collect_cpu_ms=0;
     double init_engine_ms=0,init_context_ms=0,init_buffers_ms=0,init_shaders_ms=0;
+    double init_packed_ms=0,head_prepare_cpu_ms=0;
+    double init_take_context_ms=0,init_stream_ms=0;
     std::array<RifePhaseTiming,32> phases{};unsigned phase_count=0;
     std::array<RifePhaseTiming,128> completed_phases{};unsigned completed_phase_count=0;
     // Completed D3D samples can belong to earlier pairs. Always use their IDs.

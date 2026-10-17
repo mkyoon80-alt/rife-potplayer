@@ -13,7 +13,7 @@ if($LASTEXITCODE -ne 0){throw 'Native build failed'}
 $binRoot=Join-Path $productRoot 'bin'
 New-Item -ItemType Directory -Force -Path $binRoot | Out-Null
 if(-not $SkipUi){& "$productRoot\ui\build-ui.ps1" -OutputDirectory $binRoot -DotNetExecutable $DotNetExecutable}
-foreach($name in @('RifeStandardPotPlayer.ax','RifeRegister.exe','RifeEngineCheck.exe','RifeEngineBuilder.exe')){
+foreach($name in @('RifeStandardPotPlayer.ax','RifeRegister.exe','RifeEngineCheck.exe','RifeEngineBuilder.exe','RifeSplitEngineBuilder.exe')){
     Copy-Item -LiteralPath (Join-Path "$productRoot\build\Release" $name) -Destination $binRoot -Force
 }
 if(-not(Test-Path -LiteralPath "$binRoot\RifeStandardPotPlayer.ini")) {Copy-Item -LiteralPath "$productRoot\config\RifeStandardPotPlayer.ini" -Destination $binRoot}

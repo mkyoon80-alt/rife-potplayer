@@ -37,6 +37,7 @@ using Microsoft::WRL::ComPtr;
 const CLSID kFilter = {0xe4b7fafd,0xf05c,0x43f0,{0xbf,0x7e,0x6d,0xf3,0xef,0x35,0x5a,0xbc}};
 int kWidth = 640, kHeight = 360;
 bool av1_fixture_header=false;
+bool av1_misflag=false;
 int av1_format=0;
 std::wstring vp9_case;
 REFERENCE_TIME kDuration = 417083;
@@ -99,6 +100,7 @@ CMediaType input_type() {
     if (!video) throw std::bad_alloc();
     *video = {};
     video->AvgTimePerFrame = declared_duration>=0?declared_duration:kDuration;
+    if(av1_misflag)video->dwInterlaceFlags=AMINTERLACE_IsInterlaced|AMINTERLACE_Field1First;
     video->dwPictAspectRatioX = 16;
     video->dwPictAspectRatioY = 9;
     video->rcSource = {0, 0, kWidth, kHeight};
@@ -319,6 +321,11 @@ public:
             const size_t header=av1_format==1?sizeof(VIDEOINFOHEADER):sizeof(VIDEOINFOHEADER2);
             auto* data=type.AllocFormatBuffer(ULONG(header+seq.size()));std::memset(data,0,header);
             if(!seq.empty())std::memcpy(data+header,seq.data(),seq.size());
+            if(av1_fixture_header && av1_format==2) {
+                auto* h=reinterpret_cast<VIDEOINFOHEADER2*>(data);
+                h->AvgTimePerFrame=kDuration;h->bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+                h->bmiHeader.biWidth=kWidth;h->bmiHeader.biHeight=kHeight;
+            }
             if(av1_format==2 && (vp9_case.find(L"flags-only")!=std::wstring::npos || vp9_case.find(L"conflict")!=std::wstring::npos)) {
                 DXVA2_ExtendedFormat flags{};flags.NominalRange=DXVA2_NominalRange_16_235;
                 flags.VideoPrimaries=MFVideoPrimaries_BT2020;flags.VideoTransferMatrix=MFVideoTransferMatrix_BT2020_10;
@@ -331,6 +338,10 @@ public:
         const size_t size=offsetof(MPEG2VIDEOINFO,dwSequenceHeader)+seq.size();
         auto* m=reinterpret_cast<MPEG2VIDEOINFO*>(type.AllocFormatBuffer(ULONG(size)));if(!m)return E_OUTOFMEMORY;
         std::memset(m,0,size);m->cbSequenceHeader=DWORD(seq.size());std::memcpy(m->dwSequenceHeader,seq.data(),seq.size());
+        if(av1_fixture_header) {
+            m->hdr.AvgTimePerFrame=kDuration;m->hdr.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+            m->hdr.bmiHeader.biWidth=kWidth;m->hdr.bmiHeader.biHeight=kHeight;
+        }
         return CopyMediaType(media,&type);
     }
 };
@@ -734,11 +745,17 @@ void run_rate_policy_case(IClassFactory* factory,int64_t source_num,int64_t sour
     ComPtr<IMediaControl> control;check(graph.As(&control),"policy control");
     check((preroll_prepare||startup_originals)?control->Pause():run_for_test(control.Get()),"policy initial state");
     wchar_t local[32768]{};GetEnvironmentVariableW(L"LOCALAPPDATA",local,_countof(local));
-    std::ifstream state(std::filesystem::path(local)/L"RifeStandardPotPlayer"/L"status.json");
-    std::ostringstream captured;captured<<state.rdbuf();const auto json=captured.str();
-    // Release the Windows read handle before playback replaces status.json.
-    state.close();
     const std::string expected_reason=interpolate?"":reason;
+    std::string json;
+    // Status publication is asynchronous. Wait for this state, rather than
+    // occasionally asserting on a previous stopped/partially replaced file.
+    for(unsigned attempt=0;attempt<100;++attempt){
+        {std::ifstream state(std::filesystem::path(local)/L"RifeStandardPotPlayer"/L"status.json");
+        std::ostringstream captured;captured<<state.rdbuf();json=captured.str();}
+        if(json.find("\"bypassReason\":\""+expected_reason+"\"")!=std::string::npos&&
+           json.find(interpolate?"\"state\":\"waiting\"":"\"state\":\"bypass\"")!=std::string::npos)break;
+        Sleep(5);
+    }
     if(json.find("\"bypassReason\":\""+expected_reason+"\"")==std::string::npos ||
        json.find(interpolate?"\"state\":\"waiting\"":"\"state\":\"bypass\"")==std::string::npos)
         throw std::runtime_error("rate policy status reason/state mismatch");
@@ -760,11 +777,36 @@ void run_rate_policy_case(IClassFactory* factory,int64_t source_num,int64_t sour
         const double firstMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-firstBegin).count();
         if(sink->pin().count()!=1 || sink->pin().times[0]!=0 || sink->pin().ends[0]!=kDuration)
             throw std::runtime_error("startup original buffered or timestamp changed");
+        // A controlled warm fixture settles loading before submitting the
+        // extra initial original. Cold fixtures retain the real race.
+        const bool settled=GetEnvironmentVariableW(L"NVOF_TEST_PRELOAD_SETTLED",nullptr,0)!=0;
+        if(settled)Sleep(1500);
         check(push(1),"startup queued source");
+        wchar_t cold_delay[32]{};
+        if(GetEnvironmentVariableW(L"NVOF_TEST_COLD_CANCEL_MS",cold_delay,_countof(cold_delay))){
+            const auto delay=std::clamp(_wtoi(cold_delay),0,2000);
+            const bool stop=GetEnvironmentVariableW(L"NVOF_TEST_COLD_CANCEL_STOP",nullptr,0)!=0;
+            check(control->Run(),"cold cancel Run");
+            std::thread producer([&]{for(int i=2;i<12;++i)if(push(i)!=S_OK)break;});
+            Sleep(DWORD(delay));const auto begin=std::chrono::steady_clock::now();
+            const auto result=stop?filter->Stop():source->pin().DeliverBeginFlush();
+            const auto elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
+            producer.join();check(result,"cold cancellation");
+            std::cout<<"COLD_CANCEL stop="<<stop<<" delayMs="<<delay<<" ms="<<elapsed<<std::endl;
+            if(stop){check(control->Stop(),"cold graph Stop");check(control->Run(),"cold restart");}
+            else check(source->pin().DeliverEndFlush(),"cold EndFlush");
+            const auto fresh=sink->pin().count();check(push(100),"cold fresh original");
+            if(sink->pin().count()!=fresh+1||sink->pin().last()!=100*kDuration)throw std::runtime_error("cold cancellation retained old frames");
+            check(control->Stop(),"cold final Stop");
+            if(elapsed>100)throw std::runtime_error("cold cancellation exceeded 100 ms");
+            return;
+        }
         // A controlled fixture can settle cold DLL/engine loading separately
         // from the measured Run boundary. This is never product code.
-        Sleep(GetEnvironmentVariableW(L"NVOF_TEST_PRELOAD_SETTLED",nullptr,0)?750:250);
-        if(sink->pin().count()!=1)throw std::runtime_error("paused startup advanced renderer");
+        Sleep(250);
+        const auto preroll_count=sink->pin().count();
+        if(preroll_count<1 || preroll_count>2 || (settled&&preroll_count!=2))
+            throw std::runtime_error("initial original preroll count differs from readiness policy");
         const auto runBegin=std::chrono::steady_clock::now();
         check(control->Run(),"startup Run");
         const double runMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-runBegin).count();
@@ -775,6 +817,8 @@ void run_rate_policy_case(IClassFactory* factory,int64_t source_num,int64_t sour
         size_t originals=0;
         for(size_t i=0;i<sink->pin().count();++i){
             if(i && sink->pin().times[i]!=sink->pin().ends[i-1])throw std::runtime_error("startup output gap/overlap");
+            if(sink->pin().times[i]<int64_t(cap)*kDuration && sink->pin().ends[i]-sink->pin().times[i]!=kDuration)
+                throw std::runtime_error("100-ms original/audio runway was shortened");
             if(sink->pin().ends[i]-sink->pin().times[i]==kDuration)++originals;
         }
         if(originals<1 || originals>size_t(cap) || sink->pin().count()<=size_t(cap+6))
@@ -783,7 +827,11 @@ void run_rate_policy_case(IClassFactory* factory,int64_t source_num,int64_t sour
         for(size_t i=0;i<sink->pin().count();++i)if(sink->pin().times[i]%kDuration!=0) {
             first_phase_ms=std::chrono::duration<double,std::milli>(sink->pin().arrivals[i]-runBegin).count();break;
         }
-        if(first_phase_ms<99)throw std::runtime_error("interpolated output escaped before wall deadline");
+        if(first_phase_ms<0)throw std::runtime_error("startup interpolation absent");
+        // The sink receives timestamped frames for scheduling; delivery is not
+        // presentation. A prepared phase must not be held until Run+100ms.
+        if(GetEnvironmentVariableW(L"NVOF_TEST_PRELOAD_SETTLED",nullptr,0)&&first_phase_ms>=95)
+            throw std::runtime_error("prepared output was held instead of queued for presentation");
         std::cout<<"STARTUP_BOUNDARY firstPhaseMs="<<first_phase_ms<<" cached="<<cached_stream<<'\n';
         const auto resumed=sink->pin().count();
         check(control->Pause(),"startup later Pause");check(control->Run(),"startup later Run");
@@ -808,13 +856,15 @@ void run_rate_policy_case(IClassFactory* factory,int64_t source_num,int64_t sour
                 std::this_thread::sleep_until(gateRun+std::chrono::milliseconds(50));
                 check(control->Pause(),"pause prepared startup output");
                 const auto held=sink->pin().count();
-                if(held>before+size_t(cap)+1)throw std::runtime_error("early interpolated phase before gate pause");
+                const auto multiple=size_t(expected_num*source_den/(expected_den*source_num));
+                if(held>before+size_t(cap+1)*multiple+1)throw std::runtime_error("startup emitted unrequested frames");
                 Sleep(70); // Deliberately pass the wall deadline while paused.
                 if(sink->pin().count()!=held)throw std::runtime_error("startup output advanced while paused");
             }else Sleep(10);
             const auto begin=std::chrono::steady_clock::now();
             check(stop?filter->Stop():source->pin().DeliverBeginFlush(),"startup cancellation");
             const double cancelMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
+            std::cout<<"STARTUP_CANCEL_TIMING stop="<<stop<<" ms="<<cancelMs<<std::endl;
             if(cancelMs>100)throw std::runtime_error("startup wait delayed cancellation");
             if(stop){check(control->Stop(),"startup graph Stop");check(control->Run(),"startup restart");}
             else check(source->pin().DeliverEndFlush(),"startup cancel EndFlush");
@@ -1336,6 +1386,9 @@ int wmain(int argc,wchar_t** argv) {
         if(std::wstring(argv[9]).find(L"sdr")!=std::wstring::npos){hdr_transfer=0;color_fixture=2;}
         if(std::wstring(argv[9]).find(L"vi1")!=std::wstring::npos)av1_format=1;
         if(std::wstring(argv[9]).find(L"vi2")!=std::wstring::npos)av1_format=2;
+        if(std::wstring(argv[9]).find(L"misflag")!=std::wstring::npos) {
+            av1_misflag=true;p010_media=true;color_fixture=0;
+        }
     }
     if(argc>9 && std::wstring(argv[9]).find(L"vp9-")==0) {
         vp9_case=argv[9];recover_transfer=vp9_case.find(L"hlg")!=std::wstring::npos?18:16;

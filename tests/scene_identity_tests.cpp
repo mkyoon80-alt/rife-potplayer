@@ -5,6 +5,7 @@
 #include "scene_shaders.hpp"
 #include <array>
 struct CheckScene {
+ unsigned identity_groups=4096;
  Device& dev;ComPtr<ID3D11ComputeShader> legacy,grid,identity,match;ComPtr<ID3D11Buffer> stats,readback,constants;ComPtr<ID3D11UnorderedAccessView> uav;
  CheckScene(Device& d):dev(d){
   check(dev.d->CreateComputeShader(shaders::scene::main,sizeof(shaders::scene::main),nullptr,&legacy),"legacy");
@@ -22,7 +23,7 @@ struct CheckScene {
  void dispatch(int w,int h,bool fast){
   const UINT zero[4]={};dev.c->ClearUnorderedAccessViewUint(uav.Get(),zero);ID3D11ShaderResourceView* v[]={views[0].Get(),views[1].Get(),views[2].Get(),views[3].Get()};ID3D11UnorderedAccessView* u=uav.Get();ID3D11Buffer* cb=constants.Get();dev.c->CSSetShaderResources(0,4,v);dev.c->CSSetUnorderedAccessViews(0,1,&u,nullptr);dev.c->CSSetConstantBuffers(0,1,&cb);
   dev.c->CSSetShader(fast?grid.Get():legacy.Get(),nullptr,0);dev.c->Dispatch(fast?4:(std::max(w,64)+15)/16,fast?3:(std::max(h,36)+15)/16,1);
-  if(fast){dev.c->CSSetShader(identity.Get(),nullptr,0);dev.c->Dispatch(4096,1,1);}
+  if(fast){dev.c->CSSetShader(identity.Get(),nullptr,0);dev.c->Dispatch(identity_groups,1,1);}
   dev.c->CSSetShader(match.Get(),nullptr,0);dev.c->Dispatch(80,1,1);u=nullptr;dev.c->CSSetUnorderedAccessViews(0,1,&u,nullptr);ID3D11ShaderResourceView* empty[4]={};dev.c->CSSetShaderResources(0,4,empty);
  }
  std::array<uint32_t,81> read(){D3D11_BOX box{0,0,0,81*4,1,1};dev.c->CopySubresourceRegion(readback.Get(),0,0,0,0,stats.Get(),0,&box);D3D11_MAPPED_SUBRESOURCE m{};check(dev.c->Map(readback.Get(),0,D3D11_MAP_READ,0,&m),"map");std::array<uint32_t,81> r;memcpy(r.data(),m.pData,sizeof(r));dev.c->Unmap(readback.Get(),0);return r;}

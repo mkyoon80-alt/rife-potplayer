@@ -8,8 +8,13 @@ int main(){try{
     for(int rate:{24,25,30,60}){
         w.reset();w.set_rate(1);
         require(w.decide(1000,0).original,"first picture is immediate before Run");
+        require(!w.originals_cover(999999)&&w.originals_cover(1000000),"warmup must have the full original runway queued");
         require(w.decide(9000,0).original,"paused graph must not consume window");
+        require(w.preroll_original(1),"initial original can queue before Run");
+        require(!w.preroll_original(1000000),"preroll cannot exceed existing media window");
+        require(!w.preroll_original(-1),"negative preroll is not visible output");
         require(w.run(10000),"first Run arms");
+        require(!w.preroll_original(1),"later Pause cannot reopen initial preroll");
         require(!w.run(10020),"resume must not rearm");
         for(int i=1;i<rate;++i){
             const auto d=w.decide(10001,10000000LL*i/rate);
@@ -20,7 +25,8 @@ int main(){try{
         require(!w.run(50000),"later pause does not rearm");
     }
     w.reset();w.run(0);require(w.decide(99,0).original,"99-ms original");
-    require(!w.decide(100,416667).original,"late decoder resumes immediately");
+    require(w.decide(100,416667).original,"late decoder retains the 100-ms original media interval");
+    require(!w.decide(101,1000000).original,"boundary resumes after elapsed preparation budget");
     w.reset();w.decide(0,0);w.run(10);require(w.decide(20,2000000).wait_ms==90,"wait remaining only");
     w.cancel();require(!w.decide(21,2000000).wait_ms&&!w.run(22),"seek cancels without rearm");
     w.reset();require(!w.decide(0,-1).original,"negative preroll rejected");
@@ -37,8 +43,8 @@ int main(){try{
         require(!w.begin_preparation(1010,boundary-10000000LL/rate),"no preparation during originals");
         require(w.begin_preparation(1020,boundary),"boundary may prepare early");
         require(!w.decide(1030,boundary+10000000LL/rate).original,"next endpoint can prepare");
-        require(w.output_wait_ms(1060)==40,"ready phase still withheld until deadline");
-        require(w.output_wait_ms(1099)==1,"no early release");
+        require(w.output_wait_ms(1060)==40,"remaining preparation budget");
+        require(w.output_wait_ms(1099)==1,"budget ends at the original deadline");
         require(w.output_wait_ms(1100)==0&&!w.active(),"same deadline, no extension");
         require(!w.run(2000),"no new window on resume");
         w.reset();w.decide(0,0);w.run(1000);w.begin_preparation(1020,boundary);w.cancel();

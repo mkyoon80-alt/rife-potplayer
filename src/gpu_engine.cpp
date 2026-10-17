@@ -30,6 +30,26 @@ DXGI_FORMAT plane_format(DXGI_FORMAT format,unsigned plane) {
     return format==DXGI_FORMAT_P010?(plane?DXGI_FORMAT_R16G16_UNORM:DXGI_FORMAT_R16_UNORM):(plane?DXGI_FORMAT_R8G8_UNORM:DXGI_FORMAT_R8_UNORM);
 }
 
+std::atomic<unsigned> retired_engines{0};
+struct RetiredEngine {
+    std::shared_ptr<void> host_lifetime;
+    std::unique_ptr<GpuRifeEngine> engine;
+    HMODULE module=nullptr;
+};
+DWORD WINAPI retire_engine_entry(void* value){
+    HMODULE module=nullptr;
+    {
+        std::unique_ptr<RetiredEngine> retired(static_cast<RetiredEngine*>(value));
+        module=retired->module;
+        // Avoid holding the renderer's D3D lock while the loader serializes
+        // CUDA destruction calls. The engine/stream/buffers stay owned here.
+        while(MotionSynthesizer::optional_preload_pending())Sleep(2);
+        retired->engine.reset();
+    }
+    --retired_engines;
+    FreeLibraryAndExitThread(module,0);
+}
+
 
 }
 
@@ -321,7 +341,7 @@ struct GpuRifeEngine::Impl {
     // Reuse the source planes already owned by our surface pool. The local
     // COM references survive the scene wait; prepare takes its own references.
     // External/nonpooled textures keep the existing one-call view fallback.
-    void prepare_rife(const GpuFrame& a,const GpuFrame& b,const MotionSynthesizer::GpuWait& wait,const MotionSynthesizer::PairReady& ready){
+    void prepare_rife(const GpuFrame& a,const GpuFrame& b,const MotionSynthesizer::GpuWait& wait,const MotionSynthesizer::PairReady& ready,const MotionSynthesizer::CpuWork& initialization){
         auto ta=shader_source_texture(a),tb=shader_source_texture(b);
         MotionSynthesizer::SourcePlanes planes{};
         std::array<ComPtr<ID3D11ShaderResourceView>,4> owned{};
@@ -333,7 +353,7 @@ struct GpuRifeEngine::Impl {
         // before its gate has rejected inference.
         if(std::all_of(owned.begin(),owned.end(),[](const auto& view){return bool(view);}))
             for(size_t i=0;i<owned.size();++i)planes[i]=owned[i].Get();
-        native_synthesizer->prepare(ta.Get(),tb.Get(),a.width,a.height,wait,ready,planes);
+        native_synthesizer->prepare(ta.Get(),tb.Get(),a.width,a.height,wait,ready,planes,initialization);
     }
     struct SceneAnalysis {SceneDecision decision;bool identical=false;};
     void queue_scene(const GpuFrame& a,const GpuFrame& b){
@@ -421,12 +441,36 @@ GpuPairTiming GpuRifeEngine::pair_timing()const{std::lock_guard<std::mutex> lock
 std::string GpuRifeEngine::device_name()const{return impl_->name;}
 bool GpuRifeEngine::queued_completion()const{return impl_->completion_mode==GpuCompletionMode::context_ordered;}
 void GpuRifeEngine::set_wait_service(WaitService service){std::lock_guard<std::mutex> lock(impl_->mutex);impl_->wait_service=std::move(service);}
-int GpuRifeEngine::startup_warmup(){
+int GpuRifeEngine::startup_warmup(int width,int height,bool multiple){
+    // A freshly reopened graph can overlap optional loading or retirement of
+    // its predecessor. CUDA initialization here has no cancellation callback;
+    // leave that contention to the interruptible real-pair preparation path.
+    if(MotionSynthesizer::preload_pending() || MotionSynthesizer::optional_preload_pending() || retirement_pending())return -1;
     std::lock_guard<std::mutex> lock(impl_->mutex);
     // Device resource creation and CUDA-only work do not modify the shared
     // immediate context. Do not hold its decoder/multithread lock here.
-    return impl_->native_synthesizer?impl_->native_synthesizer->startup_warmup():-1;
+    return impl_->native_synthesizer?impl_->native_synthesizer->startup_warmup(width,height,multiple):-1;
 }
+bool GpuRifeEngine::startup_ready()const{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->native_synthesizer&&impl_->native_synthesizer->startup_ready();
+}
+bool GpuRifeEngine::retire_during_preparation(std::unique_ptr<GpuRifeEngine>& engine,std::shared_ptr<void> host_lifetime)noexcept{
+    if(!engine||!MotionSynthesizer::optional_preload_pending())return false;
+    if(retired_engines.fetch_add(1)>=2){--retired_engines;return false;}
+    HMODULE module=nullptr;
+    try{
+        if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,reinterpret_cast<LPCWSTR>(&retire_engine_entry),&module)){
+            --retired_engines;return false;
+        }
+        auto job=std::make_unique<RetiredEngine>();job->module=module;
+        job->host_lifetime=std::move(host_lifetime);job->engine=std::move(engine);
+        HANDLE thread=CreateThread(nullptr,0,retire_engine_entry,job.get(),0,nullptr);
+        if(!thread){engine=std::move(job->engine);FreeLibrary(module);--retired_engines;return false;}
+        job.release();CloseHandle(thread);return true;
+    }catch(...){if(module)FreeLibrary(module);--retired_engines;return false;}
+}
+unsigned GpuRifeEngine::retirement_pending()noexcept{return retired_engines.load();}
 void GpuRifeEngine::reset()noexcept{
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->scene_detector.reset();impl_->scene_previous=nullptr;impl_->scene_previous_pts=-1;
@@ -452,8 +496,9 @@ GpuFrame GpuRifeEngine::copy(const GpuFrame& input,bool submit_now){
     else if(submit_now)impl_->context->Flush();
     return result;
 }
-PhaseBatch<GpuFrame> GpuRifeEngine::interpolate_pair(const GpuFrame& previous,const GpuFrame& current,const std::vector<int64_t>& timestamps){
+PhaseBatch<GpuFrame> GpuRifeEngine::interpolate_pair(const GpuFrame& previous,const GpuFrame& current,const std::vector<int64_t>& timestamps,const std::atomic<bool>* cancelled){
     std::lock_guard<std::mutex> lock(impl_->mutex);impl_->validate(previous);impl_->validate(current);
+    if(cancelled&&cancelled->load(std::memory_order_acquire))throw GpuWorkCancelled{};
     using Clock=std::chrono::steady_clock;
     auto tick=impl_->trace_timing?Clock::now():Clock::time_point{};
     impl_->timing={};
@@ -472,6 +517,21 @@ PhaseBatch<GpuFrame> GpuRifeEngine::interpolate_pair(const GpuFrame& previous,co
         }
         Impl::DeviceScope scope(*impl_);
         mark(impl_->timing.context_wait_ms);
+        MotionSynthesizer::CpuWork initialization;
+        if(impl_->native_synthesizer->initialization_pending())initialization=[&](const std::function<void()>& work){
+            scope.release();
+            try{
+                // The loader owns its engine/context independently of this
+                // pair. Leave that uninterruptible driver work on its thread.
+                while(cancelled&&(MotionSynthesizer::preload_pending()||retirement_pending())){
+                    if(cancelled->load(std::memory_order_acquire))throw GpuWorkCancelled{};
+                    Sleep(1);
+                }
+                if(cancelled&&cancelled->load(std::memory_order_acquire))throw GpuWorkCancelled{};
+                work();
+            }catch(...){scope.acquire();throw;}
+            scope.acquire();
+        };
         const bool profile=impl_->trace_rife&&(++impl_->profile_sequence%impl_->profile_interval==0);
         impl_->native_synthesizer->begin_timing(profile,current.pts);
         try {
@@ -495,7 +555,7 @@ PhaseBatch<GpuFrame> GpuRifeEngine::interpolate_pair(const GpuFrame& previous,co
                     [&]{impl_->wait_and_resume(scope);},[&]{
                         analysis=impl_->read_scene(scope,true);
                         return !analysis.decision.cut&&!analysis.identical;
-                    });
+                    },initialization);
                 // The scene-gate wait is charged to preparation. These
                 // stage timings measure CPU wall time, not isolated GPU work.
                 mark(impl_->timing.prepare_ms);
@@ -515,13 +575,14 @@ PhaseBatch<GpuFrame> GpuRifeEngine::interpolate_pair(const GpuFrame& previous,co
                 if(!combined) {
                     MotionSynthesizer::GpuWait wait;
                     if(queued_completion())wait=[&]{impl_->wait_and_resume(scope);};
-                    impl_->prepare_rife(previous,current,wait,{});
+                    impl_->prepare_rife(previous,current,wait,{},initialization);
                     mark(impl_->timing.prepare_ms);
                 }
                 result.quality.repetition_known=true;
                 std::vector<MotionSynthesizer::PhaseTarget> targets;
                 std::vector<ComPtr<ID3D11RenderTargetView>> targetViews;
                 targets.reserve(timestamps.size());targetViews.reserve(timestamps.size()*2);
+                const auto allocationTick=impl_->trace_timing?Clock::now():Clock::time_point{};
                 for(size_t i=0;i<timestamps.size();++i) {
                     if(!impl_->native_synthesizer->prepared()) {
                         auto held=previous;held.pts=timestamps[i];result.frames.push_back(std::move(held));
@@ -536,7 +597,16 @@ PhaseBatch<GpuFrame> GpuRifeEngine::interpolate_pair(const GpuFrame& previous,co
                     targetViews.push_back(std::move(y));targetViews.push_back(std::move(uv));
                     result.frames.push_back(std::move(output));result.quality.native_synthesized_mask|=uint32_t(1)<<i;
                 }
-                if(!targets.empty())impl_->native_synthesizer->render_phases(targets.data(),targets.size(),[&](HANDLE event){impl_->wait_cuda_ready(scope,event);});
+                if(impl_->trace_timing)impl_->timing.target_allocation_ms=std::chrono::duration<double,std::milli>(Clock::now()-allocationTick).count();
+                if(!targets.empty()) {
+                    MotionSynthesizer::CpuWork optional_setup;
+                    if(impl_->native_synthesizer->optional_setup_pending(targets.size()))optional_setup=[&](const std::function<void()>& work){
+                        scope.release();
+                        try{work();}catch(...){scope.acquire();throw;}
+                        scope.acquire();
+                    };
+                    impl_->native_synthesizer->render_phases(targets.data(),targets.size(),[&](HANDLE event){impl_->wait_cuda_ready(scope,event);},optional_setup,cancelled);
+                }
             }
             mark(impl_->timing.submit_ms);
             impl_->cached_texture=current.texture;impl_->cached_lease=current.lease;
@@ -553,6 +623,12 @@ PhaseBatch<GpuFrame> GpuRifeEngine::interpolate_pair(const GpuFrame& previous,co
             mark(impl_->timing.completion_ms);
             if(profile)impl_->timing.rife=snapshot_rife_timing(impl_->native_synthesizer->timing());
             return result;
+        }catch(const GpuWorkCancelled&){
+            // render_phases drained CUDA and restored graphics ownership. Keep
+            // compatible allocations; cancellation is not an execution failure.
+            impl_->scene_detector.reset();impl_->scene_previous=nullptr;
+            impl_->cached_texture.Reset();impl_->cached_lease.reset();
+            impl_->native_synthesizer->invalidate_history();throw;
         }catch(...){impl_->scene_detector.reset();impl_->scene_previous=nullptr;if(!scope.released)impl_->native_synthesizer->reset();throw;}
     }
     throw std::logic_error("Native synthesizer unavailable");

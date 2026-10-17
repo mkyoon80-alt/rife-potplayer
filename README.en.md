@@ -2,11 +2,11 @@
 
 Real-time 8K 240fps interpolation for PotPlayer, powered by RIFE and native D3D11. Tested at 8K 60fps ×4 on RTX 5090.
 
-**v0.2.1 · Windows x64 · RIFE 4.25 Standard**
+**v0.3.0 · Windows x64 · RIFE 4.25 Standard**
 
 **GPU support: NVIDIA GeForce RTX 50 series only.** RTX 5090 is tested; normal operation on RTX 5080 has been confirmed by the user. RTX 30 series did not work in the user’s test and is unsupported. Other GPU series are outside this release’s support scope. The 8K 60fps ×4 performance result applies to RTX 5090 only.
 
-[Download the standalone ZIP](https://github.com/mkyoon80-alt/rife-potplayer/releases/tag/v0.2.1) · [한국어](README.md) · [English HTML manual](https://mkyoon80-alt.github.io/rife-potplayer/manual.en.html) · [한글 HTML 매뉴얼](https://mkyoon80-alt.github.io/rife-potplayer/)
+[Download the standalone ZIP](https://github.com/mkyoon80-alt/rife-potplayer/releases/tag/v0.3.0) · [한국어](README.md) · [English HTML manual](https://mkyoon80-alt.github.io/rife-potplayer/manual.en.html) · [한글 HTML 매뉴얼](https://mkyoon80-alt.github.io/rife-potplayer/)
 
 The release ZIP includes the .NET/WPF runtime, NVIDIA inference runtime, model, engine preparation tool and both offline HTML manuals. Extract the entire folder and open **RifeControl.exe**. No Python, VapourSynth or separate .NET installation is required. PotPlayer x64 and a compatible NVIDIA driver are required. The application UI is currently Korean; the English manual explains every main control.
 
@@ -29,11 +29,23 @@ An engine is prepared for the computer and reused across video files. The playba
 
 The 8K 60→240fps result is a real PotPlayer test on an RTX 5090, not a guarantee for every source or configuration. Startup drops remain. VSR (GPU Super Resolution) and high interpolation rates can contend for GPU time and cause drops during motion. Both are tracked as longer-term work. A 165Hz display cannot present all 240 distinct output frames per second.
 
-Startup preparation stays at **100ms of wall-clock time**, showing originals while audio continues. The seek original-preview threshold is **50ms**; actual resumption also depends on frame cadence and a new adjacent pair. Detailed diagnostics remain enabled, sampled every 32 input pairs. UI live updates now preserve the reading position and text selection.
+Startup queues approximately **100ms of original video**, aligned to frame boundaries, while audio continues independently. The seek original-preview threshold is **50ms**; actual resumption also depends on frame cadence and a new adjacent pair. Detailed diagnostics remain enabled, sampled every 32 input pairs. UI live updates now preserve the reading position and text selection.
 
 HDR10/HLG metadata paths are tested. Dolby Vision coverage is decoder-provided metadata forwarding, not full profile/FEL/display certification. HDR10+ dynamic metadata forwarding is not implemented. See the manuals for color-format limitations.
 
 ## Development and credits
+
+v0.3.0 reduces repeated computation across intermediate frames and improves **composition efficiency for 4K and above**, including 3840×1604 movies. Selection follows source changes. Model, precision, original-resolution composition and settings are retained. Startup/seeking and affected AV1 10-bit hardware-decoding/interpolation negotiation are also improved.
+
+| Configuration | Average GPU board power |
+|---|---:|
+| v0.2.1 baseline | 210.3W |
+| v0.3.0 | 200.1W |
+| Reduction | **10.2W · about 4.9%** |
+
+RTX 5090 · 8K HDR 60p ×4 · optimizations off/on in the same validation build · 12 seconds × 2 runs each. Both measured windows had zero drops; startup drops are separate.
+
+A separate user playback check averaged **214W** over approximately one minute at 8K AV1 60p ×4 HDR, with **Dropped 0** in the capture. This does not guarantee zero drops under every startup condition. Run **Check / prepare engine** once after updating.
 
 v0.2.1 adds a **160fps** cap to both common and per-resolution output settings and fixes source FPS being doubled for some progressive HEVC 10-bit videos. A 23.976fps source previously reported as 47.952fps now correctly interpolates **23.976 → 119.88fps** at a 120fps cap. Actual interlaced inputs retain their existing processing path.
 

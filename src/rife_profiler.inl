@@ -23,7 +23,7 @@ struct RifeProfiler {
             float values[3]{};
             for(unsigned i=0;i<3;++i)if(cu->cudaEventElapsedTime(&values[i],slot.events[i*2],slot.events[i*2+1])!=cudaSuccess)slot.valid=false;
             if(slot.valid){sample.map_stream_ms=values[0];sample.inference_gpu_ms=values[1];sample.unmap_stream_ms=values[2];}
-            if(slot.valid){float copy=0;if(cu->cudaEventElapsedTime(&copy,slot.events[3],slot.events[4])!=cudaSuccess)slot.valid=false;else sample.copy_gpu_ms=copy;}
+            if(slot.valid){float copy=0;if(cu->cudaEventElapsedTime(&copy,slot.events[3],slot.events[4])!=cudaSuccess)slot.valid=false;else sample.copy_gpu_ms=sample.copy_count?copy:0;}
         }
         sample.cuda_valid=slot.valid;sample.cuda_pending=false;
         sample.event_read_cpu_ms=ms(started);slot.pending=false;

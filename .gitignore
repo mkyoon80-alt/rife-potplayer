@@ -1,5 +1,7 @@
 # Local builds, downloads, installed copies, and user settings
 /build/
+/build-local-test/
+/build-policy-test/
 /bin/
 /backup/
 /runtime/

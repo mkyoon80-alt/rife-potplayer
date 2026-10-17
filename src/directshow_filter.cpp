@@ -10,6 +10,7 @@
 #include "nvof/resolution_policy.hpp"
 #include "nvof/playback_timing.hpp"
 #include "nvof/performance_log.hpp"
+#include "nvof/playback_diagnostics.hpp"
 #include "nvof/seek_preview.hpp"
 #include "nvof/startup_original_window.hpp"
 #define WIN32_LEAN_AND_MEAN
@@ -24,7 +25,7 @@
 #include <mferror.h>
 #include <d3d9.h>
 #include <dxva2api.h>
-#include <dxgi1_2.h>
+#include <dxgi1_4.h>
 #include <shellapi.h>
 #include <cstdio>
 #include <cstdlib>
@@ -73,7 +74,7 @@ const CLSID CLSID_RifePropertyPage =
 
 namespace {
 constexpr REFERENCE_TIME kUnits = 10000000;
-constexpr char kFilterBuild[]="0.2.1";
+constexpr char kFilterBuild[]="0.3.0";
 // Public LAV/renderer COM contracts. Probing them never advertises support.
 // https://github.com/Nevcairiel/LAVFilters/blob/master/include/ID3DVideoMemoryConfiguration.h
 const IID kD3D11DecoderConfiguration =
@@ -240,6 +241,7 @@ struct Layout {
     bool interlaced=false,top_first=false;
     REFERENCE_TIME sample_duration=0;
     bool hevc_progressive_override=false;
+    bool av1_progressive_override=false;
 };
 
 bool parse_layout(const CMediaType& media, Layout& layout) noexcept {
@@ -540,6 +542,8 @@ public:
         : CTransformFilter(NAME("RIFE for PotPlayer"), outer, CLSID_RifeStandardPotPlayer) {
         *result = S_OK;
         status_writer_=nvof::acquire_status_writer();
+        try {playback_log_=nvof::playback_diagnostics::acquire();}catch(...){}
+        trace_event("filter-create");
         try {
             directory_ = module_directory();
             const auto ini = directory_ / L"RifeStandardPotPlayer.ini";
@@ -578,6 +582,7 @@ public:
     }
 
     ~NvofFilter() override {
+        trace_event("filter-destroy-begin");
         cancelled_.store(true, std::memory_order_release);
         cancel_async_input();
         join_async_input();
@@ -585,6 +590,7 @@ public:
         // Keep a final serialized cleanup for partially connected graphs.
         CAutoLock receive(&m_csReceive);
         release_native_activation();
+        trace_event("filter-destroy-end");
     }
 
     static CUnknown* WINAPI CreateInstance(LPUNKNOWN outer, HRESULT* result) {
@@ -667,6 +673,14 @@ public:
                 " selectedNvidiaIndex="+std::to_string(selected->index)+
                 " reason="+(retained?"retained-renderer-luid":"validated-nvidia-fallback"));
         }
+        // Cold CUDA preparation contends with UHD decoder surface setup. Keep
+        // early preparation through twice the FHD pixel area (including QHD
+        // and rotated QHD); larger pictures start after native activation.
+        // The area policy is independent of advertised bit depth, which may
+        // differ from the actual decoder surface. Samples and clocks stay fixed.
+        const uint64_t area=uint64_t((std::max)(0,input_.width))*uint64_t((std::max)(0,input_.height));
+        if(interpolation_requested()&&area<=2ull*1920*1080)
+            nvof::MotionSynthesizer::preload_adapter_async(directory_/L"runtime",selected->index);
         return selected->index;
     }
 
@@ -1135,6 +1149,49 @@ public:
         }catch(...){}
         return false;
     }
+    bool upstream_av1_progressive(const Layout& decoded) const noexcept {
+        // AV1 has no coded-field syntax, but a container can still describe
+        // woven/interlaced pictures. Require an explicit progressive VideoInfo2
+        // contract and a valid sequence header, not just the codec FourCC.
+        try {
+            Microsoft::WRL::ComPtr<IPin> upstream;
+            if(!m_pInput)return false;
+            if(FAILED(m_pInput->ConnectedTo(&upstream)))upstream=static_cast<ProbeInputPin*>(m_pInput)->candidate;
+            if(!upstream)return false;
+            PIN_INFO info{};if(FAILED(upstream->QueryPinInfo(&info)) || !info.pFilter)return false;
+            Microsoft::WRL::ComPtr<IBaseFilter> decoder;decoder.Attach(info.pFilter);
+            Microsoft::WRL::ComPtr<IEnumPins> pins;if(FAILED(decoder->EnumPins(&pins)))return false;
+            Microsoft::WRL::ComPtr<IPin> pin;bool found=false;
+            for(unsigned i=0;i<64;++i,pin.Reset()) {
+                const HRESULT next=pins->Next(1,&pin,nullptr);
+                if(next==S_FALSE)return found;
+                if(next!=S_OK || !pin)return false;
+                PIN_DIRECTION direction{};CMediaType mt;
+                if(FAILED(pin->QueryDirection(&direction)))return false;
+                if(direction!=PINDIR_INPUT || FAILED(pin->ConnectionMediaType(&mt)))continue;
+                if(mt.majortype!=MEDIATYPE_Video)continue;
+                const GUID base={mt.subtype.Data1,0,0x10,{0x80,0,0,0xaa,0,0x38,0x9b,0x71}};
+                if(mt.subtype!=base || (mt.subtype.Data1!=MAKEFOURCC('A','V','0','1') &&
+                    mt.subtype.Data1!=MAKEFOURCC('a','v','0','1')) || !mt.pbFormat)return false;
+                const VIDEOINFOHEADER2* h=nullptr;const BYTE* sequence=nullptr;size_t size=0;
+                if(mt.formattype==FORMAT_MPEG2Video && mt.cbFormat>=offsetof(MPEG2VIDEOINFO,dwSequenceHeader)) {
+                    const auto* m=reinterpret_cast<const MPEG2VIDEOINFO*>(mt.pbFormat);
+                    h=&m->hdr;size=m->cbSequenceHeader;
+                    if(size>mt.cbFormat - offsetof(MPEG2VIDEOINFO,dwSequenceHeader))return false;
+                    sequence=reinterpret_cast<const BYTE*>(m->dwSequenceHeader);
+                } else if(mt.formattype==FORMAT_VideoInfo2 && mt.cbFormat>sizeof(VIDEOINFOHEADER2)) {
+                    h=reinterpret_cast<const VIDEOINFOHEADER2*>(mt.pbFormat);
+                    sequence=mt.pbFormat+sizeof(VIDEOINFOHEADER2);size=mt.cbFormat-sizeof(VIDEOINFOHEADER2);
+                } else return false;
+                if(h->dwInterlaceFlags || h->bmiHeader.biSize<sizeof(BITMAPINFOHEADER) ||
+                    h->bmiHeader.biWidth!=decoded.width || h->bmiHeader.biHeight!=decoded.height ||
+                    h->AvgTimePerFrame<=0 || std::llabs(h->AvgTimePerFrame-decoded.sample_duration)>1 ||
+                    !nvof::av1_color(sequence,size))return false;
+                found=true;
+            }
+        }catch(...){}
+        return false;
+    }
     bool parse_input_layout(const CMediaType& media,Layout& layout) const noexcept {
         if(!parse_layout(media,layout))return false;
         if(layout.interlaced && upstream_avc_format().frame_mbs_only==true) {
@@ -1146,6 +1203,11 @@ public:
         if(layout.interlaced && upstream_hevc_progressive_only()) {
             layout.interlaced=false;layout.top_first=false;layout.duration=layout.sample_duration;
             layout.hevc_progressive_override=true;
+        }
+        if(layout.interlaced && layout.ten_bit && layout.cpu_format==nvof::CpuVideoFormat::p010 &&
+            upstream_av1_progressive(layout)) {
+            layout.interlaced=false;layout.top_first=false;layout.duration=layout.sample_duration;
+            layout.av1_progressive_override=true;
         }
         return true;
     }
@@ -1264,6 +1326,8 @@ public:
     }
 
     HRESULT StartStreaming() override {
+        stream_serial_.fetch_add(1,std::memory_order_relaxed);
+        trace_event("stream-start-begin");
         reopen_async_input();
         async_first_input_=true;
         async_queued_=async_peak_=0;async_backpressure_ms_=0;
@@ -1307,7 +1371,8 @@ public:
             std::to_string(input_.height) + " target=" + std::to_string(target_.num) +
             "/" + std::to_string(target_.den) + " inputRateGroup="+input_rate_group()+
             " InputRateMask="+std::to_string(input_rate_mask_)+" DoubleRate="+std::to_string(selected_multiple(input_.duration)==2)+" bypassReason="+bypass_reason()+
-            " inputInterlaced="+std::to_string(input_.interlaced)+" hevcProgressiveOverride="+std::to_string(input_.hevc_progressive_override));
+            " inputInterlaced="+std::to_string(input_.interlaced)+" hevcProgressiveOverride="+std::to_string(input_.hevc_progressive_override)+
+            " av1ProgressiveOverride="+std::to_string(input_.av1_progressive_override));
         if(performance_.enabled && m_pOutput) {
             ALLOCATOR_PROPERTIES allocation{};
             const HRESULT allocated=static_cast<nvof::transport::OutputPin*>(m_pOutput)->allocator_properties(&allocation);
@@ -1315,10 +1380,12 @@ public:
                 " buffers="+std::to_string(allocation.cBuffers)+" capacity="+std::to_string(allocation.cbBuffer)+
                 " gpu="+std::to_string(static_cast<nvof::transport::OutputPin*>(m_pOutput)->surface_allocator()));
         }
+        trace_stream("stream-start-ready",S_OK,true);
         return S_OK;
     }
 
     HRESULT StopStreaming() override {
+        trace_stream("stream-stop-begin");
         write_log("input worker queued="+std::to_string(async_queued_)+" peakPending="+std::to_string(async_peak_)+
             " capacity="+std::to_string(nvof::playback::input_queue_frames)+" producerWaitMs="+std::to_string(async_backpressure_ms_));
         write_log("output ahead peak="+std::to_string(output_ahead_peak_)+" pairs="+std::to_string(output_ahead_pairs_)+
@@ -1335,8 +1402,9 @@ public:
             " rendererRequestedMask="+std::to_string(hdr_trace_->requested_mask.load())+
             " rendererReturnedMask="+std::to_string(hdr_trace_->returned_mask.load())+
             " (bits: mastering=1 light=2 DV-RPU=4 DV-v1=8 DV-v2=16; transport only)");
-        write_log("stream stop: GPU resources released after receive quiesced");
+        write_log("stream stop: receive quiesced; GPU resources retired safely");
         write_status("stopped", "Playback stopped");
+        trace_stream("stream-stop-end");
         return S_OK;
     }
 
@@ -1349,7 +1417,11 @@ public:
     // Pausing may leave a Receive blocked in the renderer: never take
     // m_csReceive here or flush/reset its live performance window.
     HRESULT trace_playback_control(bool running,REFERENCE_TIME start=0) {
-        if(!performance_.enabled)return running?CTransformFilter::Run(start):CTransformFilter::Pause();
+        trace_event(running?"run-begin":"pause-begin");
+        if(!performance_.enabled) {
+            const HRESULT hr=running?CTransformFilter::Run(start):CTransformFilter::Pause();
+            trace_event(running?"run-end":"pause-end",hr);return hr;
+        }
         FILTER_STATE before;
         {CAutoLock filter(&m_csFilter);before=m_State;}
         const std::string action=running?"run":"pause";
@@ -1363,6 +1435,7 @@ public:
         {CAutoLock filter(&m_csFilter);after=m_State;}
         write_log("playback control end"+identity+" to="+std::to_string(int(after))+
             " result="+std::to_string(uint32_t(hr))+" elapsedMs="+std::to_string(elapsed)+" tickMs="+std::to_string(GetTickCount64()));
+        trace_event(running?"run-end":"pause-end",hr);
         return hr;
     }
     STDMETHODIMP Pause() override {
@@ -1376,13 +1449,19 @@ public:
         if(SUCCEEDED(hr)) {
             bool armed=false;
             {std::lock_guard<std::mutex> lock(async_mutex_);armed=startup_original_.run(startup_clock_ms());}
-            if(armed && performance_.enabled)write_log("startup originals begin instance="+std::to_string(instance_id_)+" wallMs=100 firstPairPreroll=0");
+            if(armed && performance_.enabled){
+                Microsoft::WRL::ComPtr<IReferenceClock> clock;REFERENCE_TIME now=0;
+                const bool valid=SUCCEEDED(GetSyncSource(&clock))&&clock&&SUCCEEDED(clock->GetTime(&now));
+                write_log("startup originals begin mediaMs=100 preparationBudgetMs=100 instance="+std::to_string(instance_id_)+" wallMs=100 firstPairPreroll=0 clockValid="+
+                    std::to_string(valid)+" clockLeadMs="+std::to_string(valid?double(now-start)/10000.0:0.0));
+            }
             set_async_paused(false);
         }
         return hr;
     }
 
     STDMETHODIMP Stop() override {
+        trace_event("stop-begin");
         cancelled_.store(true, std::memory_order_release);
         cancel_async_input();
         CTransformOutputPin* output=nullptr;
@@ -1399,29 +1478,37 @@ public:
         // must also precede the base class waiting for our streaming lock.
         // Never hold m_csFilter while entering downstream streaming methods.
         const HRESULT flushed=output ? output->DeliverBeginFlush() : S_FALSE;
+        trace_event("stop-downstream-flushed",flushed);
         join_async_input();
+        trace_event("stop-worker-joined");
         const HRESULT result=CTransformFilter::Stop();
         if (output && SUCCEEDED(flushed)) output->DeliverEndFlush();
+        trace_event("stop-end",result);
         return result;
     }
 
     HRESULT BeginFlush() override {
+        trace_event("flush-begin");
         cancelled_.store(true, std::memory_order_release);
         cancel_async_input();
         // The input pin has already rejected new Receive calls. Crucially,
         // downstream flush precedes m_csReceive to unblock Deliver/GetBuffer.
         if(m_pOutput)static_cast<nvof::transport::OutputPin*>(m_pOutput)->cancel_allocation_waits();
         const HRESULT hr = CTransformFilter::BeginFlush();
+        trace_event("flush-downstream-return",hr);
         join_async_input();
+        trace_event("flush-worker-joined");
         {
             CAutoLock receive(&m_csReceive);
             reset_history(true);
             last_pts_.reset();
         }
+        trace_event("flush-begin-return",hr);
         return hr;
     }
 
     HRESULT EndFlush() override {
+        trace_event("flush-end-begin");
         {
             CAutoLock receive(&m_csReceive);
             reset_history(true);
@@ -1443,6 +1530,7 @@ public:
             cancelled_.store(false, std::memory_order_release);
         }
         // The base input pin unblocks Receive only after this returns.
+        trace_event("flush-end-return",hr);
         return hr;
     }
 
@@ -1500,7 +1588,23 @@ public:
                     t.upstream_gap.add(std::chrono::duration<double,std::milli>(nvof::PlaybackTiming::Clock::now()-t.last_exit).count());
             }
             ~ReceiveTiming(){timer.finish();trace.flush(false,sink);if(trace.enabled)trace.last_exit=nvof::PlaybackTiming::Clock::now();}
-        } receive_timing(performance_,[this](const std::string& s){write_performance(s);});
+        } receive_timing(performance_,[this](const std::string& s){write_performance(s);
+#ifdef RIFE_OFFLINE_RENDERER_STATS
+            // Only the separate validation AX is built with this instrumentation.
+            // Called once per diagnostic window, equally in baseline/candidate runs.
+            const auto begin=nvof::PlaybackTimer::Clock::now();
+            Microsoft::WRL::ComPtr<IPin> connected;
+            HRESULT hr=m_pOutput?m_pOutput->ConnectedTo(&connected):E_POINTER;
+            PIN_INFO info{};Microsoft::WRL::ComPtr<IBaseFilter> renderer;
+            Microsoft::WRL::ComPtr<IQualProp> stats;
+            if(SUCCEEDED(hr)){hr=connected->QueryPinInfo(&info);renderer.Attach(info.pFilter);}
+            if(SUCCEEDED(hr)&&renderer)hr=renderer->QueryInterface(IID_IQualProp,reinterpret_cast<void**>(stats.GetAddressOf()));
+            int dropped=-1,drawn=-1,fps=-1,jitter=-1,offset=-1;
+            HRESULT dropHr=E_NOINTERFACE,drawHr=E_NOINTERFACE;
+            if(SUCCEEDED(hr)&&stats){dropHr=stats->get_FramesDroppedInRenderer(&dropped);drawHr=stats->get_FramesDrawn(&drawn);stats->get_AvgFrameRate(&fps);stats->get_Jitter(&jitter);stats->get_AvgSyncOffset(&offset);}
+            write_performance("renderer-stats instance="+std::to_string(instance_id_)+" queryHr="+std::to_string(uint32_t(hr))+" dropHr="+std::to_string(uint32_t(dropHr))+" drawHr="+std::to_string(uint32_t(drawHr))+" dropped="+std::to_string(dropped)+" drawn="+std::to_string(drawn)+" avgFps100="+std::to_string(fps)+" jitterMs="+std::to_string(jitter)+" syncOffsetMs="+std::to_string(offset)+" queryMs="+std::to_string(std::chrono::duration<double,std::milli>(nvof::PlaybackTimer::Clock::now()-begin).count()));
+#endif
+        });
         try {
             if (!sample_probed_) probe_sample(sample);
             if (properties->dwSampleFlags & AM_SAMPLE_TYPECHANGED) {
@@ -1593,6 +1697,8 @@ public:
                 return delivery == S_OK;
             });
             return delivery;
+        } catch (const nvof::GpuWorkCancelled&) {
+            return S_FALSE;
         } catch (const std::bad_alloc&) {
             return report_error("frame allocation failed", E_OUTOFMEMORY);
         } catch (const std::exception& error) {
@@ -1603,7 +1709,9 @@ public:
     }
 
     HRESULT EndOfStream() override {
+        trace_event("eos-begin");
         const HRESULT drained=drain_async_input();if(drained!=S_OK)return drained;
+        trace_stream("eos-drained");
         if (cancelled_.load(std::memory_order_acquire)) return S_FALSE;
         if (failed_) return E_FAIL;
         try {
@@ -1617,7 +1725,8 @@ public:
                 return delivery == S_OK;
             });
             if (delivery != S_OK) return delivery;
-            return CTransformFilter::EndOfStream();
+            const HRESULT result=CTransformFilter::EndOfStream();
+            trace_stream("eos-end",result);return result;
         } catch (const std::exception& error) {
             return report_error(std::string("end-of-stream failed: ") + error.what(), E_FAIL);
         } catch (...) {
@@ -1656,10 +1765,14 @@ private:
             PendingInput item;
             {
                 std::unique_lock<std::mutex> lock(async_mutex_);
-                // Initial and subsequent pauses use the same rule. The first
-                // original was already delivered synchronously; no speculative
-                // GPU preparation competes with the paused renderer startup.
-                async_cv_.wait(lock,[this]{return async_stop_ || (!async_paused_ && !async_queue_.empty());});
+                // Native renderer preroll may queue unchanged originals in
+                // the existing initial media window. No neural work is run
+                // before Run, and every later Pause still parks the worker.
+                async_cv_.wait(lock,[this]{return async_stop_ || (!async_queue_.empty() &&
+                    (!async_paused_ || (native_gpu_active_ && !cpu_upload_active_ &&
+                     !nvof::MotionSynthesizer::preload_pending() &&
+                     (async_queue_.front().properties.dwSampleFlags&AM_SAMPLE_TIMEVALID) &&
+                     startup_original_.preroll_original(async_queue_.front().properties.tStart))));});
                 if(async_stop_)break;
                 item=std::move(async_queue_.front());async_queue_.pop_front();async_busy_=true;
             }
@@ -1720,6 +1833,7 @@ private:
         return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
     }
     bool original_only_frame() const noexcept { return seek_preview_frame_ || startup_original_frame_; }
+    bool startup_originals_queued(int64_t stop) {std::lock_guard<std::mutex> lock(async_mutex_);return startup_original_.started()&&startup_original_.originals_cover(stop);}
     bool startup_original_for(int64_t pts) {
         std::unique_lock<std::mutex> lock(async_mutex_);
         const bool was_active=startup_original_.active();
@@ -1736,9 +1850,21 @@ private:
                     " elapsedMs="+std::to_string(elapsed)+" pts="+std::to_string(pts)+" pacingWaitMs="+std::to_string(waited));
                 return decision.original;
             }
+            // Originals can already be in the renderer's preroll queue.
+            // Retry preparation when the background loader completes instead
+            // of sleeping past that readiness change until the wall deadline.
+            if(worker_processing_ && native_gpu_active_ && !cpu_upload_active_ && !seek_preview_frame_ &&
+               !startup_resources_ready_ && !nvof::MotionSynthesizer::preload_pending()) {
+                lock.unlock();
+                const int enqueues=gpu_engine_->startup_warmup(input_.width,input_.height,selected_multiple(input_.duration)>2);
+                startup_resources_ready_=gpu_engine_->startup_ready();
+                if(performance_.enabled && (enqueues>0 || startup_resources_ready_))write_log("startup preparation progress enqueues="+std::to_string(enqueues)+" gpuReady="+std::to_string(startup_resources_ready_)+" instance="+std::to_string(instance_id_));
+                lock.lock();
+                if(startup_resources_ready_)continue;
+            }
             // Originals already cover the initial interval. Use its remaining
             // time for the adjacent pair at the boundary, never the initial
-            // paused pair. Delivery retains the existing wall-clock deadline.
+            // paused pair. The renderer schedules prepared output by its PTS.
             if(worker_processing_ && native_gpu_active_ && !cpu_upload_active_ && !seek_preview_frame_ &&
                startup_resources_ready_ && startup_original_.begin_preparation(now,pts)) {
                 startup_output_gate_=startup_boundary_original_=true;
@@ -1750,43 +1876,33 @@ private:
             // Originals covering this interval are already downstream. Park
             // only future work, with no device/renderer lock or output lease.
             // Flush, Stop and Pause wake this wait immediately.
-            async_cv_.wait_for(lock,std::chrono::milliseconds(decision.wait_ms),[this]{return async_stop_||async_paused_;});
+            async_cv_.wait_for(lock,std::chrono::milliseconds((std::min)(decision.wait_ms,uint64_t(5))),[this]{return async_stop_||async_paused_;});
             waited+=startup_clock_ms()-now;
             if(async_paused_ && !async_stop_)async_cv_.wait(lock,[this]{return async_stop_||!async_paused_;});
         }
     }
     HRESULT gate_startup_output(int64_t pts) {
         if(!startup_output_gate_)return S_OK;
-        // The anchor is an unchanged original at/after the media boundary.
-        // It can be queued normally. The following output is the first phase
-        // of the prepared pair (or EOS tail); gate that before GetBuffer.
         if(startup_boundary_original_){startup_boundary_original_=false;return S_OK;}
         std::unique_lock<std::mutex> lock(async_mutex_);
-        const auto ready_elapsed=startup_original_.elapsed(startup_clock_ms());
-        uint64_t waited=0;
-        for(;;) {
-            if(async_stop_ || cancelled_.load(std::memory_order_acquire))return S_FALSE;
-            if(async_paused_){async_cv_.wait(lock,[this]{return async_stop_||!async_paused_;});continue;}
-            const auto now=startup_clock_ms();
-            const auto remaining=startup_original_.output_wait_ms(now);
-            if(!remaining) {
-                const auto elapsed=startup_original_.elapsed(now);
-                startup_output_gate_=false;lock.unlock();
-                if(performance_.enabled)write_log("startup originals end instance="+std::to_string(instance_id_)+
-                    " elapsedMs="+std::to_string(elapsed)+" pts="+std::to_string(pts)+
-                    " pacingWaitMs="+std::to_string(waited)+" preparedOutputMs="+std::to_string(ready_elapsed));
-                return S_OK;
-            }
-            // The pair has already been submitted/flushed and engine locks
-            // released. No allocator sample is acquired during this wait.
-            async_cv_.wait_for(lock,std::chrono::milliseconds(remaining),[this]{return async_stop_||async_paused_;});
-            waited+=startup_clock_ms()-now;
-        }
+        if(async_stop_ || cancelled_.load(std::memory_order_acquire))return S_FALSE;
+        if(async_paused_)async_cv_.wait(lock,[this]{return async_stop_||!async_paused_;});
+        if(async_stop_ || cancelled_.load(std::memory_order_acquire))return S_FALSE;
+        const auto elapsed=startup_original_.elapsed(startup_clock_ms());
+        startup_output_gate_=false;startup_original_.cancel();lock.unlock();
+        // PTS, not elapsed wall time since this filter's Run call, controls
+        // presentation. The graph clock may already be running when Run is
+        // delivered here. Queue an already prepared boundary phase now so the
+        // renderer can schedule it, using normal allocator backpressure.
+        if(performance_.enabled)write_log("startup originals end preparedOutputQueued=1 instance="+std::to_string(instance_id_)+
+            " elapsedMs="+std::to_string(elapsed)+" pts="+std::to_string(pts));
+        return S_OK;
     }
     bool wait_async_running() {
         if(!worker_processing_)return !cancelled_.load(std::memory_order_acquire);
         std::unique_lock<std::mutex> lock(async_mutex_);
-        async_cv_.wait(lock,[this]{return async_stop_ || !async_paused_;});
+        async_cv_.wait(lock,[this]{return async_stop_ || !async_paused_ ||
+            (startup_original_frame_ && startup_original_.preroll_original(last_pts_.value_or(-1)));});
         return !async_stop_;
     }
     std::shared_ptr<const nvof::HdrMetadata> capture_sample_hdr(IMediaSample* sample) {
@@ -1836,6 +1952,10 @@ private:
                 " codedHeight="+std::to_string(surface.Height)+" bindFlags="+std::to_string(surface.BindFlags)+
                 " transfer="+std::to_string(output_.hdr_transfer)+" hdrMasteringBytes="+std::to_string(input.hdr?input.hdr->data[0].size():0)+
                 " hdrLightBytes="+std::to_string(input.hdr?input.hdr->data[1].size():0));
+            nvof::playback_diagnostics::emit(playback_log_,instance_id_,stream_serial_.load(),"input-surface",[&]{
+                return "format="+format+" width="+std::to_string(surface.Width)+" height="+std::to_string(surface.Height)+
+                    " arraySize="+std::to_string(surface.ArraySize)+" bindFlags="+std::to_string(surface.BindFlags);
+            });
         }
         if(!gpu_engine_)gpu_engine_=std::make_unique<nvof::GpuRifeEngine>(directory_/L"runtime",
             native_device_.Get(),native_context_.Get(),native_mutex_,nvof::GpuCompletionMode::context_ordered);
@@ -1855,14 +1975,18 @@ private:
         wait_delivery_result_=S_OK;
         if(!interpolation_requested() || original_only_frame()) {
             const HRESULT delivered=deliver_gpu({std::move(owned),stop,discontinuity});
-            // First picture is synchronous and returns immediately. Prepare
-            // only after the worker has delivered another source original.
+            // Queue the complete original/audio runway before CUDA graph
+            // preparation can occupy this worker. Warming after only the
+            // second source could starve the rest of the initial originals.
             if(delivered==S_OK && startup_original_frame_ && worker_processing_ && !startup_resources_ready_ &&
-               !cancelled_.load(std::memory_order_acquire)) {
+               !cancelled_.load(std::memory_order_acquire) && startup_originals_queued(stop)) {
                 const auto begin=startup_clock_ms();
-                const int enqueues=gpu_engine_->startup_warmup();
-                startup_resources_ready_=enqueues>=0;
-                if(startup_resources_ready_ && performance_.enabled)write_log("startup resources prepared instance="+std::to_string(instance_id_)+
+                trace_stream("warmup-begin");
+                const int enqueues=gpu_engine_->startup_warmup(input_.width,input_.height,selected_multiple(input_.duration)>2);
+                startup_resources_ready_=gpu_engine_->startup_ready();
+                if(performance_.enabled && enqueues>0)write_log("startup preparation submitted enqueues="+std::to_string(enqueues)+" gpuReady="+std::to_string(startup_resources_ready_)+" instance="+std::to_string(instance_id_));
+                trace_stream("warmup-end");
+                if(startup_resources_ready_ && performance_.enabled)write_log("startup resources GPU-complete instance="+std::to_string(instance_id_)+
                     " elapsedMs="+std::to_string(startup_clock_ms()-begin)+" syntheticCudaEnqueues="+std::to_string(enqueues)+" realPairs=0");
             }
             return delivered;
@@ -1876,7 +2000,7 @@ private:
                 const auto pair_begin=performance_.enabled?nvof::PlaybackTimer::Clock::now():nvof::PlaybackTimer::Clock::time_point{};
                 const auto ready_before=pending_gpu_outputs_.size();
                 const auto wait_delivered_before=wait_output_frames_;
-                auto batch=gpu_engine_->interpolate_pair(a,b,times);
+                auto batch=gpu_engine_->interpolate_pair(a,b,times,&cancelled_);
                 ++diagnostic_pair_count_;
                 if(performance_.enabled) try {
                     const auto timing=gpu_engine_->pair_timing();
@@ -1895,6 +2019,7 @@ private:
                             " workMs="+std::to_string(work)+" contextMs="+std::to_string(timing.context_wait_ms)+
                             " sceneMs="+std::to_string(timing.scene_ms)+" prepareMs="+std::to_string(timing.prepare_ms)+
                             " outputSubmitMs="+std::to_string(timing.completion_ms)+
+                            " targetAllocationMs="+std::to_string(timing.target_allocation_ms)+
                             " cudaReadyWaitMs="+std::to_string(timing.cuda_ready_wait_ms)+
                             " cudaReadyResumeMs="+std::to_string(timing.cuda_ready_resume_ms)+
                             " cudaReadyWaitCalls="+std::to_string(timing.cuda_ready_wait_calls)+
@@ -1926,12 +2051,17 @@ private:
                         const auto& rt=*timing.rife;
                         write_performance("rife pair instance="+std::to_string(instance_id_)+" pair="+std::to_string(rt.pair)+" pts="+std::to_string(rt.pts)+
                             " initializeCpuMs="+std::to_string(rt.initialize_cpu_ms)+" guideSubmitCpuMs="+std::to_string(rt.guide_submit_cpu_ms)+
+                            " initEngineMs="+std::to_string(rt.init_engine_ms)+" initContextMs="+std::to_string(rt.init_context_ms)+
+                            " initTakeContextMs="+std::to_string(rt.init_take_context_ms)+" initStreamMs="+std::to_string(rt.init_stream_ms)+
+                            " initBuffersMs="+std::to_string(rt.init_buffers_ms)+" initShadersMs="+std::to_string(rt.init_shaders_ms)+
+                            " initPackedMs="+std::to_string(rt.init_packed_ms)+" headPrepareCpuMs="+std::to_string(rt.head_prepare_cpu_ms)+
                             " queryCollectCpuMs="+std::to_string(rt.query_collect_cpu_ms)+" phases="+std::to_string(rt.phase_count)+
                             " cudaSkipped="+std::to_string(rt.cuda_skipped)+" cudaCompleted="+std::to_string(rt.completed_phase_count)+" cudaInvalid="+std::to_string(rt.cuda_invalid)+" d3dInvalid="+std::to_string(rt.d3d_invalid)+" d3dSkipped="+std::to_string(rt.d3d_skipped));
                         auto write_rife_phase=[&](const nvof::RifePhaseTiming& t){
                             write_performance("rife phase instance="+std::to_string(instance_id_)+" pair="+std::to_string(t.pair)+" pts="+std::to_string(t.pts)+" phase="+std::to_string(t.phase)+
                                 " width="+std::to_string(t.width)+" height="+std::to_string(t.height)+" cudaValid="+std::to_string(t.cuda_valid)+" cudaPending="+std::to_string(t.cuda_pending)+" graphReplay="+std::to_string(t.graph_replayed)+" graphCreated="+std::to_string(t.graph_created)+
-                                " externalFence="+std::to_string(t.external_fence)+" batchSize="+std::to_string(t.batch_size)+" mapCount="+std::to_string(t.map_count)+" unmapCount="+std::to_string(t.unmap_count)+" copyGpuMs="+std::to_string(t.copy_gpu_ms)+" copyCpuMs="+std::to_string(t.copy_cpu_ms)+" trtGpuMs="+std::to_string(t.inference_gpu_ms)+" mapStreamMs="+std::to_string(t.map_stream_ms)+" unmapStreamMs="+std::to_string(t.unmap_stream_ms)+
+                                " packedLayout="+std::to_string(t.packed_layout)+" headCached="+std::to_string(t.head_cached)+" headFirst="+std::to_string(t.head_cache_first)+
+                                " externalFence="+std::to_string(t.external_fence)+" batchSize="+std::to_string(t.batch_size)+" mapCount="+std::to_string(t.map_count)+" unmapCount="+std::to_string(t.unmap_count)+" copyCount="+std::to_string(t.copy_count)+" copyGpuMs="+std::to_string(t.copy_gpu_ms)+" copyCpuMs="+std::to_string(t.copy_cpu_ms)+" trtGpuMs="+std::to_string(t.inference_gpu_ms)+" mapStreamMs="+std::to_string(t.map_stream_ms)+" unmapStreamMs="+std::to_string(t.unmap_stream_ms)+
                                 " mapCpuMs="+std::to_string(t.map_cpu_ms)+" bindCpuMs="+std::to_string(t.bind_cpu_ms)+" enqueueCpuMs="+std::to_string(t.enqueue_cpu_ms)+
                                 " unmapCpuMs="+std::to_string(t.unmap_cpu_ms)+" syncCpuMs="+std::to_string(t.sync_cpu_ms)+" statusQueryCpuMs="+std::to_string(t.status_query_cpu_ms)+" timeSubmitCpuMs="+std::to_string(t.time_submit_cpu_ms)+
                                 " compositeSubmitCpuMs="+std::to_string(t.composite_submit_cpu_ms)+" eventReadCpuMs="+std::to_string(t.event_read_cpu_ms)+" phaseCpuMs="+std::to_string(t.total_cpu_ms));
@@ -2241,11 +2371,14 @@ private:
     }
 
     void release_engine() noexcept {
+        trace_event("engine-release-begin");
         cpu_upload_.reset();
         pipeline_.reset();
         engine_.reset();
         gpu_pipeline_.reset();
+        if(nvof::GpuRifeEngine::retire_during_preparation(gpu_engine_,native_mutex_lifetime_))trace_event("engine-release-deferred");
         gpu_engine_.reset();
+        trace_event("engine-release-end");
     }
 
     void release_native_activation(bool reset_transport=true) noexcept {
@@ -2265,6 +2398,7 @@ private:
 
     HRESULT report_error(const std::string& text, HRESULT hr) noexcept {
         failed_ = true;
+        trace_stream("error",hr,true,text);
         // Capture the D3D failure before releasing history; a CUDA interop
         // error can be a delayed report of an earlier device removal.
         std::string detail=text;
@@ -2380,6 +2514,7 @@ private:
                     << ",\"inputFps\":" << input_fps
                     << ",\"inputInterlaced\":" << (input_.interlaced?"true":"false")
                     << ",\"hevcProgressiveOverride\":" << (input_.hevc_progressive_override?"true":"false")
+                    << ",\"av1ProgressiveOverride\":" << (input_.av1_progressive_override?"true":"false")
                     << ",\"outputFps\":" << output_fps
                     << ",\"outputFrames\":" << output_frames_
                     << ",\"sourceFrames\":" << source_frames_
@@ -2403,7 +2538,58 @@ private:
         } catch (...) { /* Status is optional and cannot break decoding. */ }
     }
 
+    // Control methods run concurrently with Receive. They log only immutable
+    // identity and the atomic stream serial, never live streaming counters.
+    void trace_event(const char* event,HRESULT hr=S_OK) noexcept {
+        nvof::playback_diagnostics::emit(playback_log_,instance_id_,stream_serial_.load(std::memory_order_relaxed),event,[&]{
+            return std::string("build=")+kFilterBuild+" diagnostics=1 result="+nvof::playback_diagnostics::hex_code(hr);
+        });
+    }
+    // Only the streaming owner, or a quiesced graph, may snapshot these fields.
+    // No context Flush/Wait/readback or CUDA calls; device queries are limited
+    // to stream setup and errors. Disk writes remain on the background worker.
+    void trace_stream(const char* event,HRESULT hr=S_OK,bool query_device=false,const std::string& failure={}) noexcept {
+        nvof::playback_diagnostics::emit(playback_log_,instance_id_,stream_serial_.load(std::memory_order_relaxed),event,[&]{
+            std::ostringstream s;
+            s<<"build="<<kFilterBuild<<" diagnostics=1 result="<<nvof::playback_diagnostics::hex_code(hr)
+             <<" transport="<<sample_transport_<<" native="<<native_gpu_active_<<" cpuUpload="<<cpu_upload_active_
+             <<" width="<<input_.width<<" height="<<input_.height<<" tenBit="<<input_.ten_bit
+             <<" interlaced="<<input_.interlaced<<" hevcOverride="<<input_.hevc_progressive_override<<" av1Override="<<input_.av1_progressive_override
+             <<" sourceDuration100ns="<<input_.duration<<" target="<<target_.num<<'/'<<target_.den
+             <<" sourceFrames="<<source_frames_<<" outputFrames="<<output_frames_
+             <<" lastPts100ns="<<last_pts_.value_or(-1)<<" lastDuration100ns="<<last_duration_
+             <<" pendingOutput="<<pending_gpu_outputs_.size()<<" waitDelivery="<<nvof::playback_diagnostics::hex_code(wait_delivery_result_)
+             <<" warmupReady="<<startup_resources_ready_<<" startupOriginal="<<startup_original_frame_
+             <<" startupGate="<<startup_output_gate_<<" cancelled="<<cancelled_.load()
+             <<" engineLoads="<<nvof::MotionSynthesizer::engine_load_count()
+             <<" contextsCreated="<<nvof::MotionSynthesizer::execution_create_count();
+            if(query_device && native_device_) {
+                s<<" device="<<native_device_.Get()<<" removedReason="<<nvof::playback_diagnostics::hex_code(native_device_->GetDeviceRemovedReason());
+                Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+                if(SUCCEEDED(native_device_.As(&dxgi))&&SUCCEEDED(dxgi->GetAdapter(&adapter))) {
+                    DXGI_ADAPTER_DESC desc{};
+                    if(SUCCEEDED(adapter->GetDesc(&desc)))s<<" vendor="<<desc.VendorId<<" gpuDevice="<<desc.DeviceId
+                        <<" luidHigh="<<desc.AdapterLuid.HighPart<<" luidLow="<<desc.AdapterLuid.LowPart;
+                    LARGE_INTEGER version{};
+                    const HRESULT driver=adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice),&version);
+                    s<<" driverQuery="<<nvof::playback_diagnostics::hex_code(driver);
+                    if(SUCCEEDED(driver))s<<" driver="<<HIWORD(version.HighPart)<<'.'<<LOWORD(version.HighPart)<<'.'<<HIWORD(version.LowPart)<<'.'<<LOWORD(version.LowPart);
+                    Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter3;
+                    if(SUCCEEDED(adapter.As(&adapter3))) {
+                        DXGI_QUERY_VIDEO_MEMORY_INFO memory{};
+                        const HRESULT result=adapter3->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&memory);
+                        s<<" memoryQuery="<<nvof::playback_diagnostics::hex_code(result);
+                        if(SUCCEEDED(result))s<<" processGpuBytes="<<memory.CurrentUsage<<" gpuBudgetBytes="<<memory.Budget;
+                    }
+                }
+            }
+            if(!failure.empty())s<<" error="<<failure;
+            return s.str();
+        });
+    }
     const unsigned instance_id_=next_filter_instance.fetch_add(1);
+    std::atomic<unsigned> stream_serial_{0};
+    std::shared_ptr<nvof::PerformanceLog> playback_log_;
     bool async_input_enabled_=true,async_first_input_=true,worker_processing_=false;
     std::mutex async_mutex_;
     std::condition_variable async_cv_;

@@ -76,8 +76,34 @@ void pair(const std::filesystem::path& runtime,int w,int h,const std::filesystem
   auto sum=std::accumulate(ms.begin(),ms.end(),0.0);std::sort(ms.begin(),ms.end());std::cout<<"BENCH phases="<<phases<<" mean_ms="<<sum/ms.size()<<" median_ms="<<ms[ms.size()/2]<<" p95_ms="<<ms[size_t(ms.size()*.95)]<<'\n';}
  std::cout<<"PASS loads="<<MotionSynthesizer::engine_load_count()<<" inferences="<<MotionSynthesizer::inference_count()<<std::endl;
 }
+void check_optimized(const std::filesystem::path& runtime){
+ Device dev;
+ SetEnvironmentVariableW(L"RIFE_HEAD_CACHE_SYNC_PREPARE",L"1");
+ for(auto spec:std::vector<std::array<int,3>>{{640,360,0},{3840,1604,1}}){
+  const int w=spec[0],h=spec[1];const bool ten=spec[2];
+  auto a=dev.upload(pattern(w,h,0,ten),w,h,0,ten,ten?15:0);
+  auto b=dev.upload(pattern(w,h,8,ten),w,h,400000,ten,ten?15:0);
+  SetEnvironmentVariableW(L"RIFE_EXPERIMENT_PAIR_HEAD_CACHE",L"0");
+  SetEnvironmentVariableW(L"RIFE_EXPERIMENT_PACKED_MOTION",L"0");
+  auto baseline=engine(dev,runtime);auto expected=baseline->interpolate_pair(a,b,{100000,200000,300000});
+  SetEnvironmentVariableW(L"RIFE_EXPERIMENT_PAIR_HEAD_CACHE",L"1");
+  SetEnvironmentVariableW(L"RIFE_EXPERIMENT_PACKED_MOTION",L"1");
+  auto optimized=engine(dev,runtime);optimized->enable_timing(true,true,1);
+  const auto heads=MotionSynthesizer::head_cache_pair_count();
+  auto actual=optimized->interpolate_pair(a,b,{100000,200000,300000});dev.wait();
+  require(MotionSynthesizer::head_cache_pair_count()==heads+1,"E03 engines unavailable or incompatible");
+  require(actual.frames.size()==3&&expected.frames.size()==3,"Missing optimized outputs");
+  auto timing=optimized->pair_timing();require(timing.rife&&timing.rife->phase_count==3,"Optimization timing unavailable");
+  for(size_t i=0;i<3;++i){
+   require(timing.rife->phases[i].head_cached&&timing.rife->phases[i].packed_layout==(w>=3840),"Unexpected E03/E04 policy");
+   require(dev.read(actual.frames[i])==dev.read(expected.frames[i]),"Optimized engine output differs from the original engine");
+  }
+  std::cout<<"PASS optimized engines "<<w<<'x'<<h<<" exactOutputs=3 E03=1 E04="<<(w>=3840)<<std::endl;
+ }
+}
 int wmain(int argc,wchar_t** argv){timeBeginPeriod(1);int code=0;try{
  require(argc>=3,"Usage: RifeEngineCheck --check|--self-test runtime; --pair runtime width height a.nv12 b.nv12 output-prefix");
- if(std::wstring(argv[1])==L"--pair"){require(argc==8,"Invalid pair arguments");pair(argv[2],std::stoi(argv[3]),std::stoi(argv[4]),argv[5],argv[6],argv[7]);}
+ if(std::wstring(argv[1])==L"--check-optimized"){require(argc==3,"Invalid optimized check arguments");check_optimized(argv[2]);}
+ else if(std::wstring(argv[1])==L"--pair"){require(argc==8,"Invalid pair arguments");pair(argv[2],std::stoi(argv[3]),std::stoi(argv[4]),argv[5],argv[6],argv[7]);}
  else{require(std::wstring(argv[1])==L"--check"||std::wstring(argv[1])==L"--self-test","Invalid probe mode");self_test(argv[2],std::wstring(argv[1])==L"--check");}
  }catch(const std::exception& e){std::cerr<<"FAIL "<<e.what()<<std::endl;code=1;}timeEndPeriod(1);return code;}

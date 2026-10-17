@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(RifeStandardPotPlayer VERSION 0.2.1 LANGUAGES CXX RC)
+project(RifeStandardPotPlayer VERSION 0.3.0 LANGUAGES CXX RC)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -23,6 +23,12 @@ endforeach()
 add_library(nvof_pipeline INTERFACE)
 target_include_directories(nvof_pipeline INTERFACE include)
 add_library(nvof_motion_synthesizer STATIC src/rife_motion_synthesizer.cpp)
+option(RIFE_ENABLE_E03_E04_BY_DEFAULT "Enable validated E03 and resolution-gated E04 paths" ON)
+if(RIFE_ENABLE_E03_E04_BY_DEFAULT)
+  target_compile_definitions(nvof_motion_synthesizer PRIVATE RIFE_ENABLE_E03_E04_BY_DEFAULT=1)
+endif()
+add_executable(rife_context_cost tests/rife_context_cost.cpp)
+target_include_directories(rife_context_cost PRIVATE "${CUDA_HEADERS}" third_party/tensorrt)
 target_compile_definitions(nvof_motion_synthesizer PUBLIC NOMINMAX)
 target_include_directories(nvof_motion_synthesizer PUBLIC include PRIVATE "${CUDA_HEADERS}" third_party/tensorrt)
 target_link_libraries(nvof_motion_synthesizer PUBLIC d3d11 dxgi)
@@ -32,6 +38,10 @@ target_link_libraries(nvof_mf_bridge PUBLIC mfplat mfuuid d3d11 dxgi ole32 oleau
 add_library(RifeStandardPotPlayer SHARED src/directshow_filter.cpp src/filter.def src/filter.rc)
 target_link_libraries(RifeStandardPotPlayer PRIVATE nvof_engine nvof_pipeline nvof_gpu_engine nvof_phase_pipeline nvof_gpu_phase_pipeline nvof_mf_bridge strmbase strmiids ole32 oleaut32 uuid winmm advapi32 shell32)
 set_target_properties(RifeStandardPotPlayer PROPERTIES PREFIX "" SUFFIX ".ax")
+add_library(RifePlaybackProbe SHARED src/directshow_filter.cpp src/filter.def src/filter.rc)
+target_compile_definitions(RifePlaybackProbe PRIVATE RIFE_OFFLINE_RENDERER_STATS)
+target_link_libraries(RifePlaybackProbe PRIVATE nvof_engine nvof_pipeline nvof_gpu_engine nvof_phase_pipeline nvof_gpu_phase_pipeline nvof_mf_bridge strmbase strmiids ole32 oleaut32 uuid winmm advapi32 shell32)
+set_target_properties(RifePlaybackProbe PROPERTIES PREFIX "" SUFFIX ".ax")
 add_executable(RifeRegister src/register_filter.cpp)
 target_link_libraries(RifeRegister PRIVATE advapi32 ole32 oleaut32 strmiids)
 
@@ -40,15 +50,21 @@ add_executable(rife_shader_compiler tools/shader_compiler.cpp)
 target_link_libraries(rife_shader_compiler PRIVATE d3dcompiler)
 function(rife_shaders group)
   set(header "${CMAKE_CURRENT_BINARY_DIR}/generated/${group}_shaders.hpp")
+  set(extra_source)
+  if(group STREQUAL "rife_packed")
+    set(extra_source "src/shaders/rife.hlsl")
+  endif()
   add_custom_command(OUTPUT "${header}"
     COMMAND rife_shader_compiler "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${group}.hlsl" "${header}" "${group}" "rife-${group}" ${ARGN}
-    DEPENDS rife_shader_compiler "src/shaders/${group}.hlsl" VERBATIM)
+    DEPENDS rife_shader_compiler "src/shaders/${group}.hlsl" ${extra_source} VERBATIM)
 endfunction()
 rife_shaders(p010 vs vs_4_0 ps ps_5_0)
 rife_shaders(cpu_upload vs vs_5_0 ps ps_5_0 comb cs_5_0)
 rife_shaders(scene main cs_5_0 gridProbe cs_5_0 identity cs_5_0 match cs_5_0)
 rife_shaders(rife vs vs_5_0 prepareInput cs_5_0 setTime cs_5_0 composite ps_5_0 compositeY ps_5_0 compositeUV ps_5_0)
+rife_shaders(rife_packed packMotion cs_5_0 compositePackedY ps_5_0 compositePackedUV ps_5_0)
 add_custom_target(rife_shader_headers DEPENDS
+ "${CMAKE_CURRENT_BINARY_DIR}/generated/rife_packed_shaders.hpp"
  "${CMAKE_CURRENT_BINARY_DIR}/generated/rife_shaders.hpp"
  "${CMAKE_CURRENT_BINARY_DIR}/generated/p010_shaders.hpp"
  "${CMAKE_CURRENT_BINARY_DIR}/generated/cpu_upload_shaders.hpp"
@@ -69,7 +85,7 @@ foreach(test input_rate_policy output_rate_policy output_buffer_policy)
   target_link_libraries(${test}_tests PRIVATE nvof_phase_pipeline)
   add_test(NAME ${test} COMMAND ${test}_tests)
 endforeach()
-foreach(test av1_color vp9_color hevc_color hevc_scan input_height_policy cpu_video adapter_selection seek_preview status_writer gpu_wait_service resolution_policy playback_timing)
+foreach(test av1_color vp9_color hevc_color hevc_scan input_height_policy cpu_video adapter_selection seek_preview status_writer gpu_wait_service resolution_policy playback_timing rife_optimization_policy)
   add_executable(${test}_tests tests/${test}_tests.cpp)
   target_include_directories(${test}_tests PRIVATE include)
   add_test(NAME ${test} COMMAND ${test}_tests)
@@ -121,6 +137,10 @@ add_executable(performance_log_tests tests/performance_log_tests.cpp)
 target_include_directories(performance_log_tests PRIVATE include)
 add_test(NAME performance_log COMMAND performance_log_tests)
 
+add_executable(playback_diagnostics_tests tests/playback_diagnostics_tests.cpp)
+target_include_directories(playback_diagnostics_tests PRIVATE include)
+add_test(NAME playback_diagnostics COMMAND playback_diagnostics_tests)
+
 add_executable(rife_quality_hash tests/rife_quality_hash.cpp)
 target_link_libraries(rife_quality_hash PRIVATE nvof_gpu_engine winmm bcrypt)
 
@@ -145,6 +165,38 @@ add_executable(rife_batch_tests tests/rife_batch_tests.cpp)
 target_link_libraries(rife_batch_tests PRIVATE nvof_gpu_engine winmm bcrypt)
 add_test(NAME rife_batch COMMAND rife_batch_tests "${CMAKE_CURRENT_SOURCE_DIR}/bin/runtime")
 
+add_executable(rife_final_copy_tests tests/rife_final_copy_tests.cpp)
+target_link_libraries(rife_final_copy_tests PRIVATE nvof_gpu_engine winmm bcrypt)
+add_test(NAME rife_final_copy COMMAND rife_final_copy_tests "${CMAKE_CURRENT_SOURCE_DIR}/bin/runtime")
+
+add_executable(rife_cost_probe tests/rife_cost_probe.cpp)
+target_link_libraries(rife_cost_probe PRIVATE nvof_gpu_engine winmm)
+add_executable(rife_head_cache_tests tests/rife_head_cache_tests.cpp)
+target_link_libraries(rife_head_cache_tests PRIVATE nvof_gpu_engine winmm bcrypt)
+add_executable(rife_async_head_tests tests/rife_async_head_tests.cpp)
+target_link_libraries(rife_async_head_tests PRIVATE nvof_gpu_engine winmm bcrypt)
+
+add_executable(inspect_rife_engine tools/inspect_rife_engine.cpp)
+target_include_directories(inspect_rife_engine PRIVATE third_party/tensorrt "${CUDA_HEADERS}")
+
+add_executable(RifeSplitEngineBuilder tools/rife_split_engine_builder.cpp)
+target_compile_definitions(RifeSplitEngineBuilder PRIVATE NOMINMAX)
+target_include_directories(RifeSplitEngineBuilder PRIVATE third_party/tensorrt "${CUDA_HEADERS}")
+
+add_executable(rife_split_probe tests/rife_split_probe.cpp)
+target_compile_definitions(rife_split_probe PRIVATE NOMINMAX)
+target_include_directories(rife_split_probe PRIVATE third_party/tensorrt "${CUDA_HEADERS}")
+
+add_executable(rife_split_cost_probe tests/rife_split_cost_probe.cpp)
+target_compile_definitions(rife_split_cost_probe PRIVATE NOMINMAX)
+target_include_directories(rife_split_cost_probe PRIVATE third_party/tensorrt "${CUDA_HEADERS}")
+
+foreach(level 4 5)
+  add_executable(rife_builder_level${level} tools/rife_level_engine_builder.cpp)
+  target_compile_definitions(rife_builder_level${level} PRIVATE NOMINMAX RIFE_EXPERIMENT_OPTIMIZATION_LEVEL=${level})
+  target_include_directories(rife_builder_level${level} PRIVATE third_party/tensorrt "${CUDA_HEADERS}")
+endforeach()
+
 add_executable(surface_allocator_tests tests/surface_allocator_tests.cpp)
 target_compile_definitions(surface_allocator_tests PRIVATE RIFE_ALLOCATOR_TESTS)
 target_link_libraries(surface_allocator_tests PRIVATE nvof_mf_bridge)
@@ -154,12 +206,33 @@ target_include_directories(scene_identity_tests PRIVATE "${CMAKE_CURRENT_BINARY_
 target_link_libraries(scene_identity_tests PRIVATE nvof_gpu_engine winmm)
 add_dependencies(scene_identity_tests rife_shader_headers)
 add_test(NAME scene_identity COMMAND scene_identity_tests)
+add_executable(scene_dispatch_probe tests/scene_dispatch_probe.cpp)
+target_include_directories(scene_dispatch_probe PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+target_link_libraries(scene_dispatch_probe PRIVATE nvof_gpu_engine winmm d3dcompiler)
+add_dependencies(scene_dispatch_probe rife_shader_headers)
+add_executable(rife_layout_probe tests/rife_layout_probe.cpp)
+target_link_libraries(rife_layout_probe PRIVATE nvof_gpu_engine winmm d3dcompiler)
 
 add_executable(cuda_yield_service_tests tests/cuda_yield_service_tests.cpp)
 target_link_libraries(cuda_yield_service_tests PRIVATE nvof_gpu_engine winmm)
 
 add_executable(rife_startup_probe tests/rife_startup_probe.cpp)
 target_link_libraries(rife_startup_probe PRIVATE nvof_gpu_engine winmm)
+
+add_executable(rife_startup_lifecycle tests/rife_startup_lifecycle.cpp)
+target_link_libraries(rife_startup_lifecycle PRIVATE nvof_gpu_engine winmm)
+
+add_executable(rife_preload_adapter_tests tests/rife_preload_adapter_tests.cpp)
+target_link_libraries(rife_preload_adapter_tests PRIVATE nvof_gpu_engine winmm)
+add_test(NAME rife_preload_adapter COMMAND rife_preload_adapter_tests "${CMAKE_CURRENT_SOURCE_DIR}/bin/runtime")
+
+add_executable(rife_cancellation_tests tests/rife_cancellation_tests.cpp)
+target_link_libraries(rife_cancellation_tests PRIVATE nvof_gpu_engine winmm bcrypt)
+add_test(NAME rife_cancellation COMMAND rife_cancellation_tests "${CMAKE_CURRENT_SOURCE_DIR}/bin/runtime")
+
+add_executable(rife_retirement_tests tests/rife_retirement_tests.cpp)
+target_link_libraries(rife_retirement_tests PRIVATE nvof_gpu_engine winmm bcrypt)
+# Optional Head/Tail plans are required; run explicitly with that package root.
 
 add_executable(startup_original_window_tests tests/startup_original_window_tests.cpp)
 target_include_directories(startup_original_window_tests PRIVATE include)
@@ -173,3 +246,13 @@ target_include_directories(RifeEngineBuilder PRIVATE third_party/tensorrt "${CUD
 add_executable(rife_source_views_tests tests/rife_source_views_tests.cpp)
 target_link_libraries(rife_source_views_tests PRIVATE nvof_gpu_engine winmm bcrypt)
 add_test(NAME rife_source_views COMMAND rife_source_views_tests "${CMAKE_CURRENT_SOURCE_DIR}/bin/runtime")
+
+add_executable(rife_packed_combined_tests tests/rife_head_cache_tests.cpp)
+target_compile_definitions(rife_packed_combined_tests PRIVATE RIFE_TEST_PACKED_COMBINED)
+target_link_libraries(rife_packed_combined_tests PRIVATE nvof_gpu_engine winmm bcrypt)
+
+# Explicit final-pixel check for requested 8K 24p x10 (nine generated phases).
+add_executable(rife_8k24_tenfold_tests tests/rife_8k24_tenfold_tests.cpp)
+target_link_libraries(rife_8k24_tenfold_tests PRIVATE nvof_gpu_engine winmm bcrypt)
+add_executable(rife_policy_transition_tests tests/rife_policy_transition_tests.cpp)
+target_link_libraries(rife_policy_transition_tests PRIVATE nvof_gpu_engine winmm bcrypt)

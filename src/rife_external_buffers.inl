@@ -32,16 +32,18 @@ struct RifeExternalBuffers {
             active=true;
         }catch(...){release(cu);throw;}
     }
-    void acquire(Cuda& cu,cudaStream_t stream){
+    void acquire(Cuda& cu,cudaStream_t stream,const MotionSynthesizer::CpuWork& startup_work={}){
         const auto value=++serial;
         ck(context->Signal(fence.Get(),value),"Signal RIFE guide readiness");context->Flush();
         cudaExternalSemaphoreWaitParams wait{};wait.params.fence.value=value;
-        cu.check(cu.cudaWaitExternalSemaphoresAsync(&semaphore,&wait,1,stream),"Wait for RIFE guide on CUDA");
+        auto enqueue=[&]{cu.check(cu.cudaWaitExternalSemaphoresAsync(&semaphore,&wait,1,stream),"Wait for RIFE guide on CUDA");};
+        if(startup_work)startup_work(enqueue);else enqueue();
     }
-    void relinquish(Cuda& cu,cudaStream_t stream,const MotionSynthesizer::CompletionWait& completion_wait){
+    void relinquish(Cuda& cu,cudaStream_t stream,const MotionSynthesizer::CompletionWait& completion_wait,const MotionSynthesizer::CpuWork& startup_work={}){
         const auto value=++serial;
         cudaExternalSemaphoreSignalParams signal{};signal.params.fence.value=value;
-        cu.check(cu.cudaSignalExternalSemaphoresAsync(&semaphore,&signal,1,stream),"Signal RIFE motion readiness");
+        auto enqueue=[&]{cu.check(cu.cudaSignalExternalSemaphoresAsync(&semaphore,&signal,1,stream),"Signal RIFE motion readiness");};
+        if(startup_work)startup_work(enqueue);else enqueue();
         if(completion_wait&&fence->GetCompletedValue()<value){
             ck(fence->SetEventOnCompletion(value,ready_event),"Arm RIFE CUDA ready event");
             completion_wait(ready_event);

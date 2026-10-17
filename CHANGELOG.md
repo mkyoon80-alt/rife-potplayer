@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3.0 — 2026-10-17
+
+- Enable common-feature reuse for multiple intermediate frames across all source resolutions. One intermediate frame retains the original full engine; each new source pair recomputes features.
+- Enable FP32 packed composition only when the source long edge is at least 3840 pixels, including 3840×1604 movies and portrait sources. Re-evaluate on source changes, independently of VSR/window size.
+- Preserve the original-video/audio startup lead-in: queue about 100ms of source video before heavy warmup, wait for actual GPU readiness, and retain presentation timestamps. Start with the full engine while optional feature-reuse engines load; warm prepared paths using their real buffers.
+- Fix affected progressive AV1 P010 negotiation with 10-bit output for hardware decoding/interpolation. Retain the HEVC fix, real interlace handling, 160fps cap, 50ms seek preview, quality and precision.
+- Add asynchronous playback-stage/error diagnostics alongside existing sampled CPU/GPU logs. Preserve existing INI settings and logging when updating.
+- Ship full/Head/Tail engine preparation, strict original-pixel verification for optional engines, Korean/English manuals and an updated user-supplied playback capture.
+- Validated playback candidate: 34 local automated checks; 32 resolution/transition outputs, 36 QHD/8K24×10 outputs, 689 boundary outputs, 812 quality rows and 1,196 sequence outputs matched their references. Actual playlist transitions and rapid seeking passed. These counts describe candidate validation; release-package checks are listed separately in RELEASE_VALIDATION.md.
+- User observation on RTX 5090: approximately one minute of 8K AV1 60p ×4 HDR playback averaged 214W GPU board power; the supplied capture shows Dropped 0. Not a direct A/B comparison with earlier instantaneous power readings. 8K60×4 cold startup drops remain a long-term improvement task.
+
+
 ## v0.2.1 — 2026-10-17
 
 - Add the 160fps cap to common and per-resolution output settings. Integer-multiple behavior is preserved: 24→144, 30→150, 60→120fps; this setting does not change monitor refresh rate.
@@ -12,7 +24,7 @@
 ## v0.2.0 — 2026-10-15
 
 - First stable release. GPU support is limited to RTX 50 series: RTX 5090 tested; RTX 5080 normal operation user-confirmed. RTX 30 series is unsupported.
-- Updated Korean/English manuals and separate offline HTML assets, including the user-provided RTX 5090 8K playback capture (VSR OFF; approximately 265W at capture).
+- Updated Korean/English manuals and separate offline HTML assets, including the user-provided RTX 5090 8K playback capture (VSR OFF).
 
 - Keep playback state publication asynchronous; only final Stop waits for the latest status snapshot to reach disk.
 - Reuse owned NV12/P010 source plane views during RIFE preparation, with the existing fallback for external surfaces.
