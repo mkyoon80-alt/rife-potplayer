@@ -15,9 +15,9 @@
     "sha256": "f9ee6c63e1ec565ab9377f9c0a6c67cb3b04cef3cfc8e3b6542fc00ebea4784b"
   },
   {
-    "file": "assets/performance-8k-rtx5090.png",
-    "origin": "User-supplied RIFE/PotPlayer and GPU-Z screenshot; explicitly authorized for the v0.2.0 manuals. Original screenshot preserved without edits.",
-    "sha256": "84a85329739b508c3d858df597ca352cf932dbda6998bee79de76cd9842bc17e",
-    "conditions": "RTX 5090; 7680x4320 60fps x4; VSR OFF and approximately 265W board power at capture, confirmed by user; snapshot shows 239.69fps and Dropped 0. RTX 5080 has a separate user-confirmed normal-operation report, not this benchmark."
+    "file": "assets/performance-8k-v030-rtx5090.png",
+    "origin": "User-supplied final local v0.3.0 candidate playback capture, explicitly supplied for the release manuals; original image preserved.",
+    "sha256": "e76fc75969e23c32417c817d9ad408423c00fcfe628021e10dd1dc60e6b0cb9d",
+    "conditions": "RTX 5090; AV1 hardware decode, P010 7680x4320 HDR 60p x4; user reports approximately one minute average GPU board power 214W; capture shows Dropped 0. Separate from the 12-second comparison."
   }
 ]
